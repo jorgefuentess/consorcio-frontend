@@ -265,8 +265,8 @@ type MobileCardAction = {
 };
 
 function App() {
-  const [email, setEmail] = useState('admin@consorcio.com');
-  const [password, setPassword] = useState('admin123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [consorcioId, setConsorcioId] = useState('');
@@ -2388,7 +2388,12 @@ interface ManagerApiResponse extends ManagedUser {}
                       type="password"
                       label="Contraseña"
                     />
-                    <Button type="submit" variant="contained" fullWidth>
+                    <Button
+                      type="submit"
+                      variant="contained"
+                      fullWidth
+                      disabled={!email.trim() || !password.trim()}
+                    >
                       Ingresar
                     </Button>
                   </Stack>
