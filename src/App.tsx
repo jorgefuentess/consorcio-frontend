@@ -199,6 +199,7 @@ interface NotificacionesHistorialResponse {
 
 interface WhatsappHealthResponse {
   provider: string;
+  mode?: 'demo' | 'production';
   status: string;
   ready: boolean;
   detail: string;
@@ -217,6 +218,21 @@ interface WhatsappTestResponse {
   destinatarioTelefono: string | null;
   historialId: string;
   createdAt: string;
+}
+
+interface ConsorcioIntegracionResponse {
+  consorcioId: string;
+  source: 'consorcio' | 'global_demo';
+  mode: 'demo' | 'production';
+  active: boolean;
+  mercadoPagoTestPayerEmail: string | null;
+  whatsappProvider: string | null;
+  whatsappMetaPhoneNumberId: string | null;
+  hasMercadoPagoAccessToken: boolean;
+  hasWhatsappMetaToken: boolean;
+  maskedMercadoPagoAccessToken: string | null;
+  maskedWhatsappMetaToken: string | null;
+  updatedAt: string | null;
 }
 
 interface MercadoPagoPreferenceResponse {
@@ -256,7 +272,7 @@ const formatMoney = (value: number) =>
 
 const toNumber = (value: number | string) => Number(value);
 
-type ViewMode = 'unidades' | 'gastos' | 'expensas' | 'pagos' | 'propietario' | 'reportes' | 'data' | 'admin';
+type ViewMode = 'unidades' | 'gastos' | 'expensas' | 'pagos' | 'propietario' | 'reportes' | 'configuracion' | 'data' | 'admin';
 type DataTab = 'consorcios' | 'unidades' | 'gastos' | 'expensas' | 'pagos';
 type MobileCardAction = {
   label: string;
@@ -290,6 +306,18 @@ function App() {
   const [whatsappTestMessage, setWhatsappTestMessage] = useState('');
   const [whatsappTestLoading, setWhatsappTestLoading] = useState(false);
   const [whatsappTestResult, setWhatsappTestResult] = useState<WhatsappTestResponse | null>(null);
+  const [integracionLoading, setIntegracionLoading] = useState(false);
+  const [integracionSaving, setIntegracionSaving] = useState(false);
+  const [integracionMeta, setIntegracionMeta] = useState<ConsorcioIntegracionResponse | null>(null);
+  const [integracionForm, setIntegracionForm] = useState({
+    mode: 'demo' as 'demo' | 'production',
+    active: true,
+    mercadoPagoAccessToken: '',
+    mercadoPagoTestPayerEmail: '',
+    whatsappProvider: 'mock',
+    whatsappMetaToken: '',
+    whatsappMetaPhoneNumberId: '',
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showUnidadForm, setShowUnidadForm] = useState(false);
   const [showGastoForm, setShowGastoForm] = useState(false);
@@ -453,6 +481,8 @@ interface ManagerApiResponse extends ManagedUser {}
   const resetSession = () => {
     setToken(null);
     setUser(null);
+    setEmail('');
+    setPassword('');
     setMessage('');
     setCurrentStep(0);
     setConsorcioId('');
@@ -1262,6 +1292,8 @@ interface ManagerApiResponse extends ManagedUser {}
     );
 
   const handlePagarOnlineMercadoPago = async (expensa: Expensa) => {
+    const checkoutWindow = window.open('', '_blank');
+
     try {
       setIsSubmitting(true);
       const { data } = await apiClient.post<MercadoPagoPreferenceResponse>(
@@ -1273,8 +1305,20 @@ interface ManagerApiResponse extends ManagedUser {}
         throw new Error('Mercado Pago no devolvió URL de checkout');
       }
 
-      window.location.href = redirectUrl;
+      if (checkoutWindow) {
+        checkoutWindow.location.href = redirectUrl;
+      } else {
+        // Fallback if popup was blocked.
+        window.location.href = redirectUrl;
+      }
+
+      setMessage('Checkout abierto en otra pestaña. Vuelve aquí al finalizar para sincronizar el pago.');
+      setIsSubmitting(false);
     } catch (error: any) {
+      if (checkoutWindow && !checkoutWindow.closed) {
+        checkoutWindow.close();
+      }
+
       const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo iniciar el pago online';
       setMessage(`Error: ${errorMsg}`);
       setIsSubmitting(false);
@@ -1417,7 +1461,11 @@ interface ManagerApiResponse extends ManagedUser {}
   const handleLoadWhatsappHealth = async () => {
     try {
       setWhatsappHealthLoading(true);
-      const { data } = await apiClient.get<WhatsappHealthResponse>('/notificaciones/whatsapp/health');
+      const { data } = await apiClient.get<WhatsappHealthResponse>('/notificaciones/whatsapp/health', {
+        params: {
+          consorcioId: user?.role === 'admin' ? reporteConsorcioId || undefined : undefined,
+        },
+      });
       setWhatsappHealth(data);
     } catch (error: any) {
       const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo validar WhatsApp';
@@ -1454,6 +1502,77 @@ interface ManagerApiResponse extends ManagedUser {}
       setMessage(`Error: ${errorMsg}`);
     } finally {
       setWhatsappTestLoading(false);
+    }
+  };
+
+  const handleLoadConsorcioIntegracion = async () => {
+    if (user?.role !== 'admin') {
+      return;
+    }
+
+    if (!reporteConsorcioId) {
+      setMessage('Selecciona un consorcio para gestionar integraciones.');
+      return;
+    }
+
+    try {
+      setIntegracionLoading(true);
+      const { data } = await apiClient.get<ConsorcioIntegracionResponse>(`/consorcios/${reporteConsorcioId}/integracion`);
+      setIntegracionMeta(data);
+      setIntegracionForm({
+        mode: data.mode,
+        active: data.active,
+        mercadoPagoAccessToken: '',
+        mercadoPagoTestPayerEmail: data.mercadoPagoTestPayerEmail ?? '',
+        whatsappProvider: data.whatsappProvider ?? 'mock',
+        whatsappMetaToken: '',
+        whatsappMetaPhoneNumberId: data.whatsappMetaPhoneNumberId ?? '',
+      });
+      setMessage('');
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo cargar la configuración de integraciones';
+      setMessage(`Error: ${errorMsg}`);
+    } finally {
+      setIntegracionLoading(false);
+    }
+  };
+
+  const handleSaveConsorcioIntegracion = async () => {
+    if (user?.role !== 'admin') {
+      return;
+    }
+
+    if (!reporteConsorcioId) {
+      setMessage('Selecciona un consorcio para guardar integraciones.');
+      return;
+    }
+
+    try {
+      setIntegracionSaving(true);
+      const payload = {
+        mode: integracionForm.mode,
+        active: integracionForm.active,
+        mercadoPagoAccessToken: integracionForm.mercadoPagoAccessToken || undefined,
+        mercadoPagoTestPayerEmail: integracionForm.mercadoPagoTestPayerEmail || undefined,
+        whatsappProvider: integracionForm.whatsappProvider || undefined,
+        whatsappMetaToken: integracionForm.whatsappMetaToken || undefined,
+        whatsappMetaPhoneNumberId: integracionForm.whatsappMetaPhoneNumberId || undefined,
+      };
+
+      await apiClient.put(`/consorcios/${reporteConsorcioId}/integracion`, payload);
+      await handleLoadConsorcioIntegracion();
+      await handleLoadWhatsappHealth();
+      setIntegracionForm((current) => ({
+        ...current,
+        mercadoPagoAccessToken: '',
+        whatsappMetaToken: '',
+      }));
+      setMessage('Integraciones guardadas para el consorcio seleccionado.');
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo guardar la configuración de integraciones';
+      setMessage(`Error: ${errorMsg}`);
+    } finally {
+      setIntegracionSaving(false);
     }
   };
 
@@ -2228,6 +2347,13 @@ interface ManagerApiResponse extends ManagedUser {}
       visible: user?.role !== 'owner',
     },
     {
+      key: 'configuracion',
+      title: 'Configuración',
+      subtitle: 'Integraciones y notificaciones',
+      meta: 'WhatsApp y Mercado Pago',
+      visible: user?.role === 'admin',
+    },
+    {
       key: 'data',
       title: 'Tablas y registros',
       subtitle: 'Consulta historial completo',
@@ -2250,6 +2376,7 @@ interface ManagerApiResponse extends ManagedUser {}
     pagos: 'Pagos',
     propietario: 'Portal propietario',
     reportes: 'Reportes',
+    configuracion: 'Configuración',
     data: 'Tablas',
     admin: 'Administración',
   };
@@ -2262,6 +2389,7 @@ interface ManagerApiResponse extends ManagedUser {}
     pagos: <PaymentsIcon fontSize="small" />,
     propietario: <PersonIcon fontSize="small" />,
     reportes: <QueryStatsIcon fontSize="small" />,
+    configuracion: <AdminPanelSettingsIcon fontSize="small" />,
     data: <TableChartIcon fontSize="small" />,
     admin: <AdminPanelSettingsIcon fontSize="small" />,
   };
@@ -2328,12 +2456,33 @@ interface ManagerApiResponse extends ManagedUser {}
   }, [token, user?.role, pagos]);
 
   useEffect(() => {
-    if (!token || user?.role === 'owner' || viewMode !== 'reportes') {
+    if (!token || user?.role !== 'owner') {
+      return;
+    }
+
+    const handleFocus = () => {
+      void loadAllData('owner');
+    };
+
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [token, user?.role]);
+
+  useEffect(() => {
+    if (!token || user?.role === 'owner' || viewMode !== 'configuracion') {
+      return;
+    }
+
+    if (user?.role === 'admin' && !reporteConsorcioId) {
       return;
     }
 
     void handleLoadWhatsappHealth();
-  }, [token, user?.role, viewMode]);
+
+    if (user?.role === 'admin') {
+      void handleLoadConsorcioIntegracion();
+    }
+  }, [token, user?.role, viewMode, reporteConsorcioId]);
 
   return (
     <ThemeProvider theme={appTheme}>
@@ -3611,11 +3760,77 @@ interface ManagerApiResponse extends ManagedUser {}
                         >
                           {reporteLoading ? 'Consultando...' : 'Consultar'}
                         </Button>
+                      </Stack>
+
+                      {reporteResumen ? (
+                        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(4, 1fr)' }, gap: 1.5 }}>
+                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">Gastos</Typography>
+                            <Typography variant="h6">{formatMoney(reporteResumen.totalGastos)}</Typography>
+                          </Paper>
+                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">Expensas emitidas</Typography>
+                            <Typography variant="h6">{formatMoney(reporteResumen.totalExpensas)}</Typography>
+                          </Paper>
+                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">Pagos registrados</Typography>
+                            <Typography variant="h6">{formatMoney(reporteResumen.totalPagos)}</Typography>
+                          </Paper>
+                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">Saldo ({reporteResumen.periodo})</Typography>
+                            <Typography variant="h6">{formatMoney(reporteResumen.totalExpensas - reporteResumen.totalPagos)}</Typography>
+                          </Paper>
+                        </Box>
+                      ) : (
+                        <Alert severity="info">Selecciona período y consulta para ver el resumen.</Alert>
+                      )}
+                    </Stack>
+                  </CardContent>
+                </Card>
+              </Fade>
+
+              <Fade in={viewMode === 'configuracion'} mountOnEnter unmountOnExit timeout={220}>
+                <Card sx={{ borderRadius: 4 }}>
+                  <CardContent>
+                    <Stack spacing={2.5}>
+                      <Box>
+                        <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
+                          Configuración
+                        </Typography>
+                        <Typography variant="h5">Integraciones, WhatsApp y notificaciones</Typography>
+                        <Typography color="text.secondary">
+                          Gestiona claves por consorcio y valida envíos desde un panel administrativo.
+                        </Typography>
+                      </Box>
+
+                      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+                        <TextField
+                          select
+                          label="Consorcio"
+                          value={reporteConsorcioId}
+                          onChange={(event) => setReporteConsorcioId(event.target.value)}
+                          fullWidth
+                        >
+                          {consorcios.map((consorcio) => (
+                            <MenuItem key={consorcio.id} value={consorcio.id}>
+                              {consorcio.nombre}
+                            </MenuItem>
+                          ))}
+                        </TextField>
+
+                        <TextField
+                          label="Período"
+                          type="month"
+                          value={reportePeriodo}
+                          onChange={(event) => setReportePeriodo(event.target.value)}
+                          fullWidth
+                          InputLabelProps={{ shrink: true }}
+                        />
 
                         <Button
                           variant="outlined"
                           onClick={handleSendPendingReminders}
-                          disabled={recordatorioLoading || !reportePeriodo || (user?.role === 'admin' && !reporteConsorcioId)}
+                          disabled={recordatorioLoading || !reportePeriodo || !reporteConsorcioId}
                         >
                           {recordatorioLoading ? 'Enviando...' : 'Recordar pendientes'}
                         </Button>
@@ -3631,12 +3846,147 @@ interface ManagerApiResponse extends ManagedUser {}
                         <Stack spacing={1.2}>
                           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1}>
                             <Box>
+                              <Typography variant="subtitle1">Integraciones por consorcio</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Permite usar claves propias por edificio y mantener fallback demo global.
+                              </Typography>
+                            </Box>
+                            <Button
+                              variant="outlined"
+                              size="small"
+                              onClick={handleLoadConsorcioIntegracion}
+                              disabled={integracionLoading || !reporteConsorcioId}
+                            >
+                              {integracionLoading ? 'Cargando...' : 'Recargar configuración'}
+                            </Button>
+                          </Stack>
+
+                          {!reporteConsorcioId ? (
+                            <Alert severity="info">Selecciona un consorcio para editar sus integraciones.</Alert>
+                          ) : (
+                            <>
+                              {integracionMeta && (
+                                <Alert severity={integracionMeta.source === 'consorcio' ? 'success' : 'warning'}>
+                                  Fuente activa: {integracionMeta.source === 'consorcio' ? 'configuración propia del consorcio' : 'fallback global demo'}.
+                                  {integracionMeta.updatedAt ? ` Última actualización: ${new Date(integracionMeta.updatedAt).toLocaleString('es-AR')}.` : ''}
+                                </Alert>
+                              )}
+
+                              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}>
+                                <TextField
+                                  select
+                                  label="Modo"
+                                  value={integracionForm.mode}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    mode: event.target.value as 'demo' | 'production',
+                                  }))}
+                                  fullWidth
+                                >
+                                  <MenuItem value="demo">Demo</MenuItem>
+                                  <MenuItem value="production">Producción</MenuItem>
+                                </TextField>
+
+                                <TextField
+                                  select
+                                  label="Estado"
+                                  value={integracionForm.active ? 'active' : 'inactive'}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    active: event.target.value === 'active',
+                                  }))}
+                                  fullWidth
+                                >
+                                  <MenuItem value="active">Activa</MenuItem>
+                                  <MenuItem value="inactive">Inactiva</MenuItem>
+                                </TextField>
+
+                                <TextField
+                                  label="Proveedor WhatsApp"
+                                  value={integracionForm.whatsappProvider}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    whatsappProvider: event.target.value,
+                                  }))}
+                                  fullWidth
+                                />
+                              </Stack>
+
+                              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}>
+                                <TextField
+                                  label="MP Access Token (opcional)"
+                                  type="password"
+                                  value={integracionForm.mercadoPagoAccessToken}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    mercadoPagoAccessToken: event.target.value,
+                                  }))}
+                                  helperText={integracionMeta?.maskedMercadoPagoAccessToken ? `Actual: ${integracionMeta.maskedMercadoPagoAccessToken}` : 'Si lo dejas vacío, usa fallback global.'}
+                                  fullWidth
+                                />
+
+                                <TextField
+                                  label="MP Test Payer Email"
+                                  value={integracionForm.mercadoPagoTestPayerEmail}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    mercadoPagoTestPayerEmail: event.target.value,
+                                  }))}
+                                  fullWidth
+                                />
+                              </Stack>
+
+                              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}>
+                                <TextField
+                                  label="WhatsApp Meta Token (opcional)"
+                                  type="password"
+                                  value={integracionForm.whatsappMetaToken}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    whatsappMetaToken: event.target.value,
+                                  }))}
+                                  helperText={integracionMeta?.maskedWhatsappMetaToken ? `Actual: ${integracionMeta.maskedWhatsappMetaToken}` : 'Si lo dejas vacío, usa fallback global.'}
+                                  fullWidth
+                                />
+
+                                <TextField
+                                  label="WhatsApp Phone Number ID"
+                                  value={integracionForm.whatsappMetaPhoneNumberId}
+                                  onChange={(event) => setIntegracionForm((current) => ({
+                                    ...current,
+                                    whatsappMetaPhoneNumberId: event.target.value,
+                                  }))}
+                                  fullWidth
+                                />
+
+                                <Button
+                                  variant="contained"
+                                  onClick={handleSaveConsorcioIntegracion}
+                                  disabled={integracionSaving || !reporteConsorcioId}
+                                >
+                                  {integracionSaving ? 'Guardando...' : 'Guardar claves'}
+                                </Button>
+                              </Stack>
+                            </>
+                          )}
+                        </Stack>
+                      </Paper>
+
+                      <Paper sx={{ p: 1.5, borderRadius: 2.5, border: '1px solid #d8e6df', backgroundColor: '#f9fcfb' }}>
+                        <Stack spacing={1.2}>
+                          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1}>
+                            <Box>
                               <Typography variant="subtitle1">Conexión WhatsApp</Typography>
                               <Typography variant="caption" color="text.secondary">
                                 Verifica proveedor, credenciales y número activo sin salir del panel.
                               </Typography>
                             </Box>
-                            <Button variant="outlined" size="small" onClick={handleLoadWhatsappHealth} disabled={whatsappHealthLoading}>
+                            <Button
+                              variant="outlined"
+                              size="small"
+                              onClick={handleLoadWhatsappHealth}
+                              disabled={whatsappHealthLoading || !reporteConsorcioId}
+                            >
                               {whatsappHealthLoading ? 'Verificando...' : 'Verificar conexión'}
                             </Button>
                           </Stack>
@@ -3649,7 +3999,7 @@ interface ManagerApiResponse extends ManagedUser {}
                                 Estado: {whatsappHealth.ready ? 'Listo para enviar' : 'No listo'}
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                Proveedor: {whatsappHealth.provider} | Estado técnico: {whatsappHealth.status}
+                                Proveedor: {whatsappHealth.provider} | Modo: {whatsappHealth.mode ?? 'demo'} | Estado técnico: {whatsappHealth.status}
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
                                 Detalle: {whatsappHealth.detail}
@@ -3713,7 +4063,7 @@ interface ManagerApiResponse extends ManagedUser {}
                             <Box>
                               <Typography variant="subtitle1">Historial de notificaciones</Typography>
                               <Typography variant="caption" color="text.secondary">
-                                Visible para manager y admin. Muestra envíos mock, omitidos y errores.
+                                Visible para administración. Muestra envíos, omitidos y errores.
                               </Typography>
                             </Box>
                             <Button variant="outlined" size="small" onClick={handleLoadNotificationHistory} disabled={historialLoading}>
@@ -3756,29 +4106,6 @@ interface ManagerApiResponse extends ManagedUser {}
                           )}
                         </Stack>
                       </Paper>
-
-                      {reporteResumen ? (
-                        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(4, 1fr)' }, gap: 1.5 }}>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Gastos</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalGastos)}</Typography>
-                          </Paper>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Expensas emitidas</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalExpensas)}</Typography>
-                          </Paper>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Pagos registrados</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalPagos)}</Typography>
-                          </Paper>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Saldo ({reporteResumen.periodo})</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalExpensas - reporteResumen.totalPagos)}</Typography>
-                          </Paper>
-                        </Box>
-                      ) : (
-                        <Alert severity="info">Selecciona período y consulta para ver el resumen.</Alert>
-                      )}
                     </Stack>
                   </CardContent>
                 </Card>
