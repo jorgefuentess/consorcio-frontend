@@ -242,10 +242,77 @@ interface MercadoPagoPreferenceResponse {
   sandboxInitPoint: string | null;
 }
 
+interface Alquiler {
+  id: string;
+  contratoId: string;
+  consorcioId: string;
+  unidadId: string;
+  inquilinoId: string;
+  periodo: string;
+  monto: number;
+  fechaVencimiento: string;
+  fechaGeneracion: string;
+  fechaPago: string | null;
+  estado: 'pendiente' | 'aprobado' | 'rechazado' | 'vencido';
+  metodo: 'manual' | 'online' | null;
+  referencia: string | null;
+  comprobanteUrl: string | null;
+  observacion: string | null;
+  unidad?: { numero: string };
+}
+
+interface AlquilerApiResponse extends Omit<Alquiler, 'monto'> {
+  monto: number | string;
+}
+
+interface GenerarAlquileresResponse {
+  periodo: string;
+  consorcioId: string;
+  contratosActivos: number;
+  generados: number;
+  existentes: number;
+}
+
+interface RecordatorioAlquilerResponse {
+  periodo: string;
+  consorcioId: string;
+  recordatoriosGenerados: number;
+  proveedor: string;
+}
+
+interface MercadoPagoAlquilerPreferenceResponse {
+  alquilerId: string;
+  preferenceId: string;
+  initPoint: string;
+  sandboxInitPoint: string | null;
+}
+
+interface ContratoAlquiler {
+  id: string;
+  consorcioId: string;
+  unidadId: string;
+  inquilinoId: string;
+  montoMensual: number;
+  diaVencimiento: number;
+  activo: boolean;
+  createdAt: string;
+  unidad?: { numero: string };
+  inquilino?: { id: string; name: string; email: string };
+}
+
+interface InquilinoUser {
+  id: string;
+  name: string;
+  email: string;
+  phoneNumber: string;
+  consorcioId?: string | null;
+}
+
 const roleLabels: Record<Role, string> = {
   admin: 'Administrador general',
   manager: 'Administrador de consorcio',
   owner: 'Propietario',
+  tenant: 'Inquilino',
 };
 
 const notificationTypeLabels: Record<string, string> = {
@@ -253,6 +320,9 @@ const notificationTypeLabels: Record<string, string> = {
   pago_recibido: 'Pago recibido',
   pago_pendiente_recordatorio: 'Recordatorio de pago',
   pago_pendiente_revision_manager: 'Pago pendiente de revision',
+  alquiler_generado: 'Alquiler generado',
+  alquiler_pagado: 'Pago de alquiler recibido',
+  alquiler_pendiente_recordatorio: 'Recordatorio de alquiler',
 };
 
 const getNotificationTypeLabel = (item: NotificacionHistorialItem): string => {
@@ -272,7 +342,7 @@ const formatMoney = (value: number) =>
 
 const toNumber = (value: number | string) => Number(value);
 
-type ViewMode = 'unidades' | 'gastos' | 'expensas' | 'pagos' | 'propietario' | 'reportes' | 'configuracion' | 'data' | 'admin';
+type ViewMode = 'unidades' | 'gastos' | 'expensas' | 'pagos' | 'propietario' | 'alquiler' | 'reportes' | 'configuracion' | 'data' | 'admin';
 type DataTab = 'consorcios' | 'unidades' | 'gastos' | 'expensas' | 'pagos';
 type MobileCardAction = {
   label: string;
@@ -353,6 +423,31 @@ function App() {
   const [expensas, setExpensas] = useState<Expensa[]>([]);
 interface ManagerApiResponse extends ManagedUser {}
   const [pagos, setPagos] = useState<Pago[]>([]);
+  const [alquileres, setAlquileres] = useState<Alquiler[]>([]);
+  const [contratos, setContratos] = useState<ContratoAlquiler[]>([]);
+  const [inquilinos, setInquilinos] = useState<InquilinoUser[]>([]);
+  const [alquilerGeneracionLoading, setAlquilerGeneracionLoading] = useState(false);
+  const [alquilerReminderLoading, setAlquilerReminderLoading] = useState(false);
+  const [alquilerResultado, setAlquilerResultado] = useState<GenerarAlquileresResponse | null>(null);
+  const [alquilerReminderResultado, setAlquilerReminderResultado] = useState<RecordatorioAlquilerResponse | null>(null);
+  const [contratoDialogOpen, setContratoDialogOpen] = useState(false);
+  const [editContratoId, setEditContratoId] = useState<string | null>(null);
+  const [contratoForm, setContratoForm] = useState({
+    consorcioId: '',
+    unidadId: '',
+    inquilinoId: '',
+    montoMensual: '',
+    diaVencimiento: '10',
+  });
+  const [inquilinoDialogOpen, setInquilinoDialogOpen] = useState(false);
+  const [editInquilinoId, setEditInquilinoId] = useState<string | null>(null);
+  const [inquilinoForm, setInquilinoForm] = useState({
+    name: '',
+    email: '',
+    phoneNumber: '',
+    password: '',
+    consorcioId: '',
+  });
   const [managers, setManagers] = useState<ManagerApiResponse[]>([]);
   const [owners, setOwners] = useState<OwnerApiResponse[]>([]);
 
@@ -513,8 +608,9 @@ interface ManagerApiResponse extends ManagedUser {}
       setUser(data.user);
       setAuthToken(data.accessToken);
       setMessage('');
-      setCurrentStep(data.user.role === 'owner' ? 4 : 1);
-      setViewMode(data.user.role === 'owner' ? 'propietario' : 'unidades');
+      const isEndUser = data.user.role === 'owner' || data.user.role === 'tenant';
+      setCurrentStep(isEndUser ? 4 : 1);
+      setViewMode(isEndUser ? 'propietario' : 'unidades');
       setOwnerPaymentReceipt(null);
       setManualPaymentExpensa(null);
       setManualComprobanteFile(null);
@@ -529,10 +625,11 @@ interface ManagerApiResponse extends ManagedUser {}
     const activeRole = targetRole ?? user?.role;
 
     try {
-      if (activeRole === 'owner') {
-        const [expensasResponse, pagosResponse] = await Promise.all([
+      if (activeRole === 'owner' || activeRole === 'tenant') {
+        const [expensasResponse, pagosResponse, alquileresResponse] = await Promise.all([
           apiClient.get<ExpensaApiResponse[]>('/expensas'),
           apiClient.get<PagoApiResponse[]>('/pagos'),
+          apiClient.get<AlquilerApiResponse[]>('/alquileres'),
         ]);
 
         const nextExpensas = expensasResponse.data.map((expensa) => ({
@@ -546,12 +643,17 @@ interface ManagerApiResponse extends ManagedUser {}
           monto: toNumber(pago.monto),
           unidadNumero: pago.unidad?.numero,
         }));
+        const nextAlquileres = alquileresResponse.data.map((alquiler) => ({
+          ...alquiler,
+          monto: toNumber(alquiler.monto),
+        }));
 
         setConsorcios([]);
         setUnidades([]);
         setGastos([]);
         setExpensas(nextExpensas);
         setPagos(nextPagos);
+        setAlquileres(nextAlquileres);
         setReporteResumen(null);
         setNotificacionesHistorial([]);
         setWhatsappHealth(null);
@@ -562,12 +664,20 @@ interface ManagerApiResponse extends ManagedUser {}
         return;
       }
 
-      const [consorciosResponse, unidadesResponse, gastosResponse, expensasResponse, pagosResponse, ownersResponse, historialResponse] = await Promise.all([
+      const [consorciosResponse, unidadesResponse, gastosResponse, expensasResponse, pagosResponse, alquileresResponse, contratosResponse, inquilinosResponse, ownersResponse, historialResponse] = await Promise.all([
         apiClient.get<Consorcio[]>('/consorcios'),
         apiClient.get<UnidadApiResponse[]>('/unidades'),
         apiClient.get<GastoApiResponse[]>('/gastos'),
         apiClient.get<ExpensaApiResponse[]>('/expensas'),
         apiClient.get<PagoApiResponse[]>('/pagos'),
+        apiClient.get<AlquilerApiResponse[]>('/alquileres', {
+          params: {
+            periodo: reportePeriodo,
+            consorcioId: activeRole === 'admin' ? reporteConsorcioId || undefined : undefined,
+          },
+        }),
+        apiClient.get<ContratoAlquiler[]>('/alquileres/contratos'),
+        apiClient.get<InquilinoUser[]>('/users/tenants'),
         apiClient.get<OwnerApiResponse[]>('/users/owners'),
         apiClient.get<NotificacionesHistorialResponse>('/notificaciones/historial', {
           params: {
@@ -600,12 +710,19 @@ interface ManagerApiResponse extends ManagedUser {}
         monto: toNumber(pago.monto),
         unidadNumero: pago.unidad?.numero,
       }));
+      const nextAlquileres = alquileresResponse.data.map((alquiler) => ({
+        ...alquiler,
+        monto: toNumber(alquiler.monto),
+      }));
 
       setConsorcios(nextConsorcios);
       setUnidades(nextUnidades);
       setGastos(nextGastos);
       setExpensas(nextExpensas);
       setPagos(nextPagos);
+      setAlquileres(nextAlquileres);
+      setContratos(contratosResponse.data.map((c) => ({ ...c, montoMensual: toNumber(c.montoMensual) })));
+      setInquilinos(inquilinosResponse.data);
       setOwners(ownersResponse.data);
       setNotificacionesHistorial(historialResponse.data.items);
       setMobileUnidadesDisplayCount(20);
@@ -1328,18 +1445,27 @@ interface ManagerApiResponse extends ManagedUser {}
   const syncMercadoPagoReturnIfNeeded = async () => {
     const params = new URLSearchParams(window.location.search);
     const pagoId = params.get('pagoId');
-    if (!pagoId) {
+    const alquilerId = params.get('alquilerId');
+
+    if (!pagoId && !alquilerId) {
       return;
     }
 
     try {
-      const { data } = await apiClient.post<Pago>(`/pagos/${pagoId}/mercadopago/sync`);
-      const normalizedPago = {
-        ...data,
-        monto: toNumber((data as unknown as { monto: string | number }).monto),
-      };
-      setOwnerPaymentReceipt(normalizedPago);
-      await loadAllData('owner');
+      if (pagoId) {
+        const { data } = await apiClient.post<Pago>(`/pagos/${pagoId}/mercadopago/sync`);
+        const normalizedPago = {
+          ...data,
+          monto: toNumber((data as unknown as { monto: string | number }).monto),
+        };
+        setOwnerPaymentReceipt(normalizedPago);
+      }
+
+      if (alquilerId) {
+        await apiClient.post<Alquiler>(`/alquileres/${alquilerId}/mercadopago/sync`);
+      }
+
+      await loadAllData(user?.role);
     } catch (error: any) {
       const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo sincronizar el pago online';
       setMessage(`Error: ${errorMsg}`);
@@ -1457,6 +1583,237 @@ interface ManagerApiResponse extends ManagedUser {}
       setMessage(`Error: ${errorMsg}`);
     } finally {
       setHistorialLoading(false);
+    }
+  };
+
+  const handleGenerarAlquileres = async () => {
+    try {
+      if (user?.role === 'admin' && !reporteConsorcioId) {
+        setMessage('Selecciona un consorcio para generar alquileres.');
+        return;
+      }
+
+      setAlquilerGeneracionLoading(true);
+      const { data } = await apiClient.post<GenerarAlquileresResponse>('/alquileres/generar', {
+        periodo: reportePeriodo,
+        consorcioId: reporteConsorcioId || undefined,
+      });
+      setAlquilerResultado(data);
+      await loadAllData();
+      setMessage('');
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudieron generar alquileres';
+      setMessage(`Error: ${errorMsg}`);
+    } finally {
+      setAlquilerGeneracionLoading(false);
+    }
+  };
+
+  const handleRecordarAlquileres = async () => {
+    try {
+      if (user?.role === 'admin' && !reporteConsorcioId) {
+        setMessage('Selecciona un consorcio para enviar recordatorios de alquiler.');
+        return;
+      }
+
+      setAlquilerReminderLoading(true);
+      const { data } = await apiClient.post<RecordatorioAlquilerResponse>('/alquileres/recordatorios', {
+        periodo: reportePeriodo,
+        consorcioId: reporteConsorcioId || undefined,
+      });
+      setAlquilerReminderResultado(data);
+      if (user?.role === 'admin') {
+        await handleLoadNotificationHistory();
+      }
+      setMessage('');
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudieron enviar recordatorios de alquiler';
+      setMessage(`Error: ${errorMsg}`);
+    } finally {
+      setAlquilerReminderLoading(false);
+    }
+  };
+
+  const handlePagarAlquilerOnline = async (alquiler: Alquiler) => {
+    const checkoutWindow = window.open('', '_blank');
+
+    try {
+      const { data } = await apiClient.post<MercadoPagoAlquilerPreferenceResponse>(
+        `/alquileres/${alquiler.id}/mercadopago/preference`,
+      );
+
+      const redirectUrl = data.initPoint || data.sandboxInitPoint;
+      if (!redirectUrl) {
+        throw new Error('Mercado Pago no devolvió URL de checkout');
+      }
+
+      if (checkoutWindow) {
+        checkoutWindow.location.href = redirectUrl;
+      } else {
+        window.location.href = redirectUrl;
+      }
+    } catch (error: any) {
+      if (checkoutWindow && checkoutWindow.location.href === 'about:blank') {
+        checkoutWindow.close();
+      }
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo iniciar el pago de alquiler';
+      setMessage(`Error: ${errorMsg}`);
+    }
+  };
+
+  const handleRegistrarPagoAlquilerManual = async (alquilerId: string) => {
+    try {
+      await apiClient.patch(`/alquileres/${alquilerId}/pago-manual`, {});
+      await loadAllData();
+      setMessage('Pago de alquiler registrado manualmente.');
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo registrar el pago manual de alquiler';
+      setMessage(`Error: ${errorMsg}`);
+    }
+  };
+
+  const handleOpenContratoDialog = (contrato?: ContratoAlquiler) => {
+    if (contrato) {
+      setEditContratoId(contrato.id);
+      setContratoForm({
+        consorcioId: contrato.consorcioId,
+        unidadId: contrato.unidadId,
+        inquilinoId: contrato.inquilinoId,
+        montoMensual: String(contrato.montoMensual),
+        diaVencimiento: String(contrato.diaVencimiento),
+      });
+    } else {
+      setEditContratoId(null);
+      setContratoForm({
+        consorcioId: user?.role === 'manager' ? (consorcios[0]?.id ?? '') : (reporteConsorcioId || consorcios[0]?.id || ''),
+        unidadId: '',
+        inquilinoId: '',
+        montoMensual: '',
+        diaVencimiento: '10',
+      });
+    }
+    setContratoDialogOpen(true);
+  };
+
+  const handleSaveContrato = async () => {
+    try {
+      const payload = {
+        consorcioId: contratoForm.consorcioId,
+        unidadId: contratoForm.unidadId,
+        inquilinoId: contratoForm.inquilinoId,
+        montoMensual: parseFloat(contratoForm.montoMensual),
+        diaVencimiento: parseInt(contratoForm.diaVencimiento, 10),
+      };
+      if (editContratoId) {
+        await apiClient.patch(`/alquileres/contratos/${editContratoId}`, {
+          inquilinoId: payload.inquilinoId,
+          montoMensual: payload.montoMensual,
+          diaVencimiento: payload.diaVencimiento,
+        });
+        setMessage('Contrato actualizado.');
+      } else {
+        await apiClient.post('/alquileres/contratos', payload);
+        setMessage('Contrato de alquiler creado.');
+      }
+      setContratoDialogOpen(false);
+      await loadAllData();
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo guardar el contrato';
+      setMessage(`Error: ${errorMsg}`);
+    }
+  };
+
+  const handleDeactivateContrato = async (contratoId: string) => {
+    try {
+      await apiClient.patch(`/alquileres/contratos/${contratoId}`, { activo: false });
+      setMessage('Contrato desactivado.');
+      await loadAllData();
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo desactivar el contrato';
+      setMessage(`Error: ${errorMsg}`);
+    }
+  };
+
+  const handleOpenInquilinoDialog = (inquilino?: InquilinoUser) => {
+    if (inquilino) {
+      setEditInquilinoId(inquilino.id);
+      setInquilinoForm({
+        name: inquilino.name,
+        email: inquilino.email,
+        phoneNumber: inquilino.phoneNumber ?? '',
+        password: '',
+        consorcioId: inquilino.consorcioId ?? '',
+      });
+    } else {
+      setEditInquilinoId(null);
+      setInquilinoForm({
+        name: '',
+        email: '',
+        phoneNumber: '',
+        password: '',
+        consorcioId: user?.role === 'admin' ? (reporteConsorcioId || consorcios[0]?.id || '') : '',
+      });
+    }
+    setInquilinoDialogOpen(true);
+  };
+
+  const handleSaveInquilino = async () => {
+    try {
+      if (editInquilinoId) {
+        const body: Record<string, string> = {};
+        if (inquilinoForm.name) body.name = inquilinoForm.name;
+        if (inquilinoForm.email) body.email = inquilinoForm.email;
+        if (inquilinoForm.phoneNumber) body.phoneNumber = inquilinoForm.phoneNumber;
+        if (inquilinoForm.password) body.password = inquilinoForm.password;
+        await apiClient.patch(`/users/tenants/${editInquilinoId}`, body);
+        setMessage('Inquilino actualizado.');
+      } else {
+        await apiClient.post('/users/tenants', {
+          name: inquilinoForm.name,
+          email: inquilinoForm.email,
+          phoneNumber: inquilinoForm.phoneNumber || undefined,
+          password: inquilinoForm.password,
+          consorcioId: inquilinoForm.consorcioId || undefined,
+        });
+        setMessage('Inquilino creado.');
+      }
+      setInquilinoDialogOpen(false);
+      await loadAllData();
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo guardar el inquilino';
+      setMessage(`Error: ${errorMsg}`);
+    }
+  };
+
+  const handleRemoveInquilino = async (inquilinoId: string) => {
+    try {
+      await apiClient.delete(`/users/tenants/${inquilinoId}`);
+      setMessage('Inquilino eliminado.');
+      await loadAllData();
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo eliminar el inquilino';
+      setMessage(`Error: ${errorMsg}`);
+    }
+  };
+
+  const syncPendingAlquileresOnline = async () => {
+    try {
+      const pending = alquileres.filter((item) => item.estado === 'pendiente' && item.metodo === 'online');
+      if (pending.length === 0) {
+        return;
+      }
+
+      for (const alquiler of pending) {
+        try {
+          await apiClient.post(`/alquileres/${alquiler.id}/mercadopago/sync`);
+        } catch (error) {
+          console.warn('No se pudo sincronizar alquiler online pendiente', alquiler.id, error);
+        }
+      }
+
+      await loadAllData();
+    } catch (error) {
+      console.warn('Error sincronizando alquileres online', error);
     }
   };
 
@@ -2283,7 +2640,7 @@ interface ManagerApiResponse extends ManagedUser {}
 
   const currentAction = renderStepAction();
   const validationMessages = getValidationMessages();
-  const totalRegistros = consorcios.length + unidades.length + gastos.length + expensas.length + pagos.length;
+  const totalRegistros = consorcios.length + unidades.length + gastos.length + expensas.length + pagos.length + alquileres.length;
   const moduleStepByView: Partial<Record<ViewMode, number>> = {
     unidades: 1,
     gastos: 2,
@@ -2312,42 +2669,49 @@ interface ManagerApiResponse extends ManagedUser {}
       title: 'Unidades',
       subtitle: 'Alta, edición y baja',
       meta: `${unidades.length} unidades`,
-      visible: user?.role !== 'owner',
+      visible: user?.role !== 'owner' && user?.role !== 'tenant',
     },
     {
       key: 'gastos',
       title: 'Gastos del mes',
       subtitle: 'Carga de gastos comunes',
       meta: `${gastos.length} gastos`,
-      visible: user?.role !== 'owner',
+      visible: user?.role !== 'owner' && user?.role !== 'tenant',
     },
     {
       key: 'expensas',
       title: 'Generar expensas',
       subtitle: 'Liquidación por unidad',
       meta: `${expensas.length} expensas`,
-      visible: user?.role !== 'owner',
+      visible: user?.role !== 'owner' && user?.role !== 'tenant',
     },
     {
       key: 'pagos',
       title: 'Registrar pago',
       subtitle: 'Manual u online',
       meta: `${pagos.length} pagos`,
-      visible: user?.role !== 'owner',
+      visible: user?.role !== 'owner' && user?.role !== 'tenant',
     },
     {
       key: 'propietario',
-      title: 'Portal propietario',
+      title: user?.role === 'tenant' ? 'Portal inquilino' : 'Portal propietario',
       subtitle: 'Ver expensa y pagar',
       meta: `${expensas.length} expensas`,
-      visible: user?.role === 'owner',
+      visible: user?.role === 'owner' || user?.role === 'tenant',
+    },
+    {
+      key: 'alquiler',
+      title: user?.role === 'tenant' ? 'Mi alquiler' : 'Administración de alquileres',
+      subtitle: user?.role === 'tenant' ? 'Deuda y pagos de alquiler' : 'Gestión mensual y cobranza',
+      meta: `${alquileres.length} alquileres`,
+      visible: user?.role === 'admin' || user?.role === 'manager' || user?.role === 'tenant',
     },
     {
       key: 'reportes',
       title: 'Reportes',
       subtitle: 'Resumen mensual',
       meta: reportePeriodo,
-      visible: user?.role !== 'owner',
+      visible: user?.role !== 'owner' && user?.role !== 'tenant',
     },
     {
       key: 'configuracion',
@@ -2361,7 +2725,7 @@ interface ManagerApiResponse extends ManagedUser {}
       title: 'Tablas y registros',
       subtitle: 'Consulta historial completo',
       meta: `${totalRegistros} registros`,
-      visible: true,
+      visible: user?.role !== 'tenant',
     },
     {
       key: 'admin',
@@ -2379,7 +2743,8 @@ interface ManagerApiResponse extends ManagedUser {}
     gastos: 'Gastos',
     expensas: 'Expensas',
     pagos: 'Pagos',
-    propietario: 'Portal propietario',
+    propietario: user?.role === 'tenant' ? 'Portal inquilino' : 'Portal propietario',
+    alquiler: user?.role === 'tenant' ? 'Mi alquiler' : 'Administración de alquileres',
     reportes: 'Reportes',
     configuracion: 'Configuración',
     data: 'Tablas',
@@ -2396,6 +2761,7 @@ interface ManagerApiResponse extends ManagedUser {}
     expensas: <DescriptionIcon fontSize="small" />,
     pagos: <PaymentsIcon fontSize="small" />,
     propietario: <PersonIcon fontSize="small" />,
+    alquiler: <PaymentsIcon fontSize="small" />,
     reportes: <QueryStatsIcon fontSize="small" />,
     configuracion: <AdminPanelSettingsIcon fontSize="small" />,
     data: <TableChartIcon fontSize="small" />,
@@ -2448,7 +2814,7 @@ interface ManagerApiResponse extends ManagedUser {}
   };
 
   useEffect(() => {
-    if (!token || user?.role !== 'owner') {
+    if (!token || (user?.role !== 'owner' && user?.role !== 'tenant')) {
       return;
     }
 
@@ -2456,7 +2822,7 @@ interface ManagerApiResponse extends ManagedUser {}
   }, [token, user?.role]);
 
   useEffect(() => {
-    if (!token || user?.role !== 'owner' || pagos.length === 0) {
+    if (!token || (user?.role !== 'owner' && user?.role !== 'tenant') || pagos.length === 0) {
       return;
     }
 
@@ -2464,12 +2830,20 @@ interface ManagerApiResponse extends ManagedUser {}
   }, [token, user?.role, pagos]);
 
   useEffect(() => {
-    if (!token || user?.role !== 'owner') {
+    if (!token || user?.role !== 'tenant' || alquileres.length === 0) {
+      return;
+    }
+
+    void syncPendingAlquileresOnline();
+  }, [token, user?.role, alquileres]);
+
+  useEffect(() => {
+    if (!token || (user?.role !== 'owner' && user?.role !== 'tenant')) {
       return;
     }
 
     const handleFocus = () => {
-      void loadAllData('owner');
+      void loadAllData(user.role);
     };
 
     window.addEventListener('focus', handleFocus);
@@ -2477,7 +2851,7 @@ interface ManagerApiResponse extends ManagedUser {}
   }, [token, user?.role]);
 
   useEffect(() => {
-    if (!token || user?.role === 'owner' || viewMode !== 'configuracion') {
+    if (!token || user?.role === 'owner' || user?.role === 'tenant' || viewMode !== 'configuracion') {
       return;
     }
 
@@ -3525,7 +3899,7 @@ interface ManagerApiResponse extends ManagedUser {}
                     <Stack spacing={2.5}>
                       <Box>
                         <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
-                          Portal Propietario
+                          {user?.role === 'tenant' ? 'Portal Inquilino' : 'Portal Propietario'}
                         </Typography>
                         <Typography variant="h5">Mi expensa del mes y pagos</Typography>
                         <Typography color="text.secondary">
@@ -3724,6 +4098,449 @@ interface ManagerApiResponse extends ManagedUser {}
                   </CardContent>
                 </Card>
               </Fade>
+
+              <Fade in={viewMode === 'alquiler'} mountOnEnter unmountOnExit timeout={220}>
+                <Stack spacing={3}>
+                  {/* ── ABM de Inquilinos (solo admin/manager) ── */}
+                  {(user?.role === 'admin' || user?.role === 'manager') && (
+                    <Card sx={{ borderRadius: 4 }}>
+                      <CardContent>
+                        <Stack spacing={2}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                            <Box>
+                              <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
+                                Inquilinos
+                              </Typography>
+                              <Typography variant="h6">Gestión de inquilinos</Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                Registra los inquilinos antes de crear contratos de alquiler.
+                              </Typography>
+                            </Box>
+                            <Button variant="contained" size="small" onClick={() => handleOpenInquilinoDialog()}>
+                              + Nuevo inquilino
+                            </Button>
+                          </Stack>
+
+                          {inquilinos.length === 0 ? (
+                            <Alert severity="warning">
+                              No hay inquilinos registrados. Crea uno para poder asignarlo a un contrato.
+                            </Alert>
+                          ) : (
+                            <TableContainer component={Paper}>
+                              <Table size="small">
+                                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                  <TableRow>
+                                    <TableCell>Nombre</TableCell>
+                                    <TableCell>Email</TableCell>
+                                    <TableCell>Teléfono</TableCell>
+                                    {user?.role === 'admin' && <TableCell>Consorcio</TableCell>}
+                                    <TableCell>Acciones</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {inquilinos.map((inq) => (
+                                    <TableRow key={inq.id}>
+                                      <TableCell>{inq.name}</TableCell>
+                                      <TableCell>{inq.email}</TableCell>
+                                      <TableCell>{inq.phoneNumber ?? '-'}</TableCell>
+                                      {user?.role === 'admin' && (
+                                        <TableCell>
+                                          {consorcios.find((c) => c.id === inq.consorcioId)?.nombre ?? inq.consorcioId?.slice(0, 8) ?? '-'}
+                                        </TableCell>
+                                      )}
+                                      <TableCell>
+                                        <Stack direction="row" spacing={1}>
+                                          <Button size="small" variant="outlined" onClick={() => handleOpenInquilinoDialog(inq)}>
+                                            Editar
+                                          </Button>
+                                          <Button
+                                            size="small"
+                                            variant="outlined"
+                                            color="error"
+                                            onClick={() => handleRemoveInquilino(inq.id)}
+                                          >
+                                            Eliminar
+                                          </Button>
+                                        </Stack>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          )}
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* ── Contratos de alquiler (solo admin/manager) ── */}
+                  {(user?.role === 'admin' || user?.role === 'manager') && (
+                    <Card sx={{ borderRadius: 4 }}>
+                      <CardContent>
+                        <Stack spacing={2}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                            <Box>
+                              <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
+                                Contratos de alquiler
+                              </Typography>
+                              <Typography variant="h6">Contratos activos</Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                Gestiona los contratos vigentes: inquilino, unidad, monto mensual y día de vencimiento.
+                              </Typography>
+                            </Box>
+                            <Button variant="contained" size="small" onClick={() => handleOpenContratoDialog()}>
+                              + Nuevo contrato
+                            </Button>
+                          </Stack>
+
+                          {contratos.length === 0 ? (
+                            <Alert severity="info">No hay contratos activos. Crea el primero para comenzar a generar alquileres.</Alert>
+                          ) : (
+                            <TableContainer component={Paper}>
+                              <Table size="small">
+                                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                  <TableRow>
+                                    <TableCell>Unidad</TableCell>
+                                    <TableCell>Inquilino</TableCell>
+                                    <TableCell align="right">Monto mensual</TableCell>
+                                    <TableCell>Día venc.</TableCell>
+                                    <TableCell>Estado</TableCell>
+                                    <TableCell>Acciones</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {contratos.map((contrato) => (
+                                    <TableRow key={contrato.id}>
+                                      <TableCell>{contrato.unidad?.numero ?? contrato.unidadId.slice(0, 8)}</TableCell>
+                                      <TableCell>{contrato.inquilino?.name ?? contrato.inquilinoId.slice(0, 8)}</TableCell>
+                                      <TableCell align="right">{formatMoney(contrato.montoMensual)}</TableCell>
+                                      <TableCell>{contrato.diaVencimiento}</TableCell>
+                                      <TableCell>
+                                        <Chip
+                                          label={contrato.activo ? 'Activo' : 'Inactivo'}
+                                          color={contrato.activo ? 'success' : 'default'}
+                                          size="small"
+                                        />
+                                      </TableCell>
+                                      <TableCell>
+                                        <Stack direction="row" spacing={1}>
+                                          <Button size="small" variant="outlined" onClick={() => handleOpenContratoDialog(contrato)}>
+                                            Editar
+                                          </Button>
+                                          {contrato.activo && (
+                                            <Button
+                                              size="small"
+                                              variant="outlined"
+                                              color="error"
+                                              onClick={() => handleDeactivateContrato(contrato.id)}
+                                            >
+                                              Desactivar
+                                            </Button>
+                                          )}
+                                        </Stack>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          )}
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* ── Generación y seguimiento mensual ── */}
+                  <Card sx={{ borderRadius: 4 }}>
+                    <CardContent>
+                      <Stack spacing={2.5}>
+                        <Box>
+                          <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
+                            Alquileres
+                          </Typography>
+                          <Typography variant="h5">
+                            {user?.role === 'tenant' ? 'Mi alquiler' : 'Liquidación mensual'}
+                          </Typography>
+                          <Typography color="text.secondary">
+                            {user?.role === 'tenant'
+                              ? 'Consulta tus alquileres mensuales y registra el pago.'
+                              : 'Genera alquileres del período, registra pagos y envía recordatorios de cobranza.'}
+                          </Typography>
+                        </Box>
+
+                        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+                          {user?.role === 'admin' && (
+                            <TextField
+                              select
+                              label="Consorcio"
+                              value={reporteConsorcioId}
+                              onChange={(event) => setReporteConsorcioId(event.target.value)}
+                              fullWidth
+                            >
+                              {consorcios.map((consorcio) => (
+                                <MenuItem key={consorcio.id} value={consorcio.id}>
+                                  {consorcio.nombre}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+                          )}
+                          <TextField
+                            label="Período"
+                            type="month"
+                            value={reportePeriodo}
+                            onChange={(event) => setReportePeriodo(event.target.value)}
+                            fullWidth
+                            InputLabelProps={{ shrink: true }}
+                          />
+                          {(user?.role === 'admin' || user?.role === 'manager') && (
+                            <>
+                              <Button
+                                variant="contained"
+                                onClick={handleGenerarAlquileres}
+                                disabled={alquilerGeneracionLoading || !reportePeriodo || (user?.role === 'admin' && !reporteConsorcioId)}
+                              >
+                                {alquilerGeneracionLoading ? 'Generando...' : 'Generar alquileres'}
+                              </Button>
+                              <Button
+                                variant="outlined"
+                                onClick={handleRecordarAlquileres}
+                                disabled={alquilerReminderLoading || !reportePeriodo || (user?.role === 'admin' && !reporteConsorcioId)}
+                              >
+                                {alquilerReminderLoading ? 'Enviando...' : 'Recordar pendientes'}
+                              </Button>
+                            </>
+                          )}
+                        </Stack>
+
+                        {alquilerResultado && (
+                          <Alert severity="success">
+                            Alquileres {alquilerResultado.periodo}: generados {alquilerResultado.generados}, ya existentes {alquilerResultado.existentes}. Contratos activos: {alquilerResultado.contratosActivos}.
+                          </Alert>
+                        )}
+
+                        {alquilerReminderResultado && (
+                          <Alert severity="success">
+                            Se enviaron {alquilerReminderResultado.recordatoriosGenerados} recordatorios ({alquilerReminderResultado.periodo}) por {alquilerReminderResultado.proveedor}.
+                          </Alert>
+                        )}
+
+                        {alquileres.length === 0 ? (
+                          <Alert severity="info">No hay alquileres para el filtro actual. Generá los del período con el botón de arriba.</Alert>
+                        ) : (
+                          <TableContainer component={Paper}>
+                            <Table size="small">
+                              <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                <TableRow>
+                                  <TableCell>Período</TableCell>
+                                  <TableCell>Unidad</TableCell>
+                                  <TableCell align="right">Monto</TableCell>
+                                  <TableCell>Estado</TableCell>
+                                  <TableCell>Método</TableCell>
+                                  <TableCell>Vencimiento</TableCell>
+                                  <TableCell>Acciones</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {alquileres.map((alquiler) => (
+                                  <TableRow key={alquiler.id}>
+                                    <TableCell>{alquiler.periodo}</TableCell>
+                                    <TableCell>{alquiler.unidad?.numero ?? alquiler.unidadId.slice(0, 8)}</TableCell>
+                                    <TableCell align="right">{formatMoney(alquiler.monto)}</TableCell>
+                                    <TableCell>
+                                      <Chip
+                                        label={alquiler.estado}
+                                        size="small"
+                                        color={alquiler.estado === 'aprobado' ? 'success' : alquiler.estado === 'vencido' ? 'error' : 'warning'}
+                                      />
+                                    </TableCell>
+                                    <TableCell>{alquiler.metodo ?? '-'}</TableCell>
+                                    <TableCell>{new Date(alquiler.fechaVencimiento).toLocaleDateString('es-AR')}</TableCell>
+                                    <TableCell>
+                                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                                        {alquiler.estado !== 'aprobado' && (
+                                          <Button size="small" variant="contained" onClick={() => handlePagarAlquilerOnline(alquiler)}>
+                                            Pagar online
+                                          </Button>
+                                        )}
+                                        {(user?.role === 'admin' || user?.role === 'manager') && alquiler.estado !== 'aprobado' && (
+                                          <Button size="small" variant="outlined" onClick={() => handleRegistrarPagoAlquilerManual(alquiler.id)}>
+                                            Manual
+                                          </Button>
+                                        )}
+                                      </Stack>
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        )}
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                </Stack>
+              </Fade>
+
+              {/* ── Dialog: Crear / Editar Contrato ── */}
+              <Dialog open={contratoDialogOpen} onClose={() => setContratoDialogOpen(false)} fullWidth maxWidth="sm">
+                <DialogTitle sx={{ backgroundColor: '#e7f3ef', borderBottom: '1px solid #c9dfd7' }}>
+                  {editContratoId ? 'Editar contrato de alquiler' : 'Nuevo contrato de alquiler'}
+                </DialogTitle>
+                <DialogContent>
+                  <Stack spacing={2} sx={{ pt: 2 }}>
+                    {user?.role === 'admin' && !editContratoId && (
+                      <TextField
+                        select
+                        label="Consorcio"
+                        value={contratoForm.consorcioId}
+                        onChange={(e) => setContratoForm((prev) => ({ ...prev, consorcioId: e.target.value, unidadId: '' }))}
+                        fullWidth
+                        required
+                      >
+                        {consorcios.map((c) => (
+                          <MenuItem key={c.id} value={c.id}>{c.nombre}</MenuItem>
+                        ))}
+                      </TextField>
+                    )}
+                    {!editContratoId && (
+                      <TextField
+                        select
+                        label="Unidad"
+                        value={contratoForm.unidadId}
+                        onChange={(e) => setContratoForm((prev) => ({ ...prev, unidadId: e.target.value }))}
+                        fullWidth
+                        required
+                      >
+                        {unidades
+                          .filter((u) => !contratoForm.consorcioId || u.consorcioId === contratoForm.consorcioId)
+                          .map((u) => (
+                            <MenuItem key={u.id} value={u.id}>{u.numero}</MenuItem>
+                          ))}
+                      </TextField>
+                    )}
+                    <TextField
+                      select
+                      label="Inquilino"
+                      value={contratoForm.inquilinoId}
+                      onChange={(e) => setContratoForm((prev) => ({ ...prev, inquilinoId: e.target.value }))}
+                      fullWidth
+                      required
+                    >
+                      {inquilinos.length === 0 ? (
+                        <MenuItem value="" disabled>No hay inquilinos registrados</MenuItem>
+                      ) : (
+                        inquilinos.map((inq) => (
+                          <MenuItem key={inq.id} value={inq.id}>{inq.name} — {inq.email}</MenuItem>
+                        ))
+                      )}
+                    </TextField>
+                    <TextField
+                      label="Monto mensual"
+                      type="number"
+                      value={contratoForm.montoMensual}
+                      onChange={(e) => setContratoForm((prev) => ({ ...prev, montoMensual: e.target.value }))}
+                      fullWidth
+                      required
+                      inputProps={{ min: 0.01, step: 0.01 }}
+                    />
+                    <TextField
+                      label="Día de vencimiento (1-31)"
+                      type="number"
+                      value={contratoForm.diaVencimiento}
+                      onChange={(e) => setContratoForm((prev) => ({ ...prev, diaVencimiento: e.target.value }))}
+                      fullWidth
+                      required
+                      inputProps={{ min: 1, max: 31, step: 1 }}
+                    />
+                  </Stack>
+                </DialogContent>
+                <DialogActions sx={{ px: 3, pb: 2 }}>
+                  <Button onClick={() => setContratoDialogOpen(false)}>Cancelar</Button>
+                  <Button
+                    variant="contained"
+                    onClick={handleSaveContrato}
+                    disabled={
+                      !contratoForm.inquilinoId ||
+                      !contratoForm.montoMensual ||
+                      !contratoForm.diaVencimiento ||
+                      (!editContratoId && (!contratoForm.unidadId))
+                    }
+                  >
+                    {editContratoId ? 'Guardar cambios' : 'Crear contrato'}
+                  </Button>
+                </DialogActions>
+              </Dialog>
+
+              {/* ── Dialog: Crear / Editar Inquilino ── */}
+              <Dialog open={inquilinoDialogOpen} onClose={() => setInquilinoDialogOpen(false)} fullWidth maxWidth="sm">
+                <DialogTitle sx={{ backgroundColor: '#e7f3ef', borderBottom: '1px solid #c9dfd7' }}>
+                  {editInquilinoId ? 'Editar inquilino' : 'Nuevo inquilino'}
+                </DialogTitle>
+                <DialogContent>
+                  <Stack spacing={2} sx={{ pt: 2 }}>
+                    {user?.role === 'admin' && !editInquilinoId && (
+                      <TextField
+                        select
+                        label="Consorcio"
+                        value={inquilinoForm.consorcioId}
+                        onChange={(e) => setInquilinoForm((prev) => ({ ...prev, consorcioId: e.target.value }))}
+                        fullWidth
+                        required
+                      >
+                        {consorcios.map((c) => (
+                          <MenuItem key={c.id} value={c.id}>{c.nombre}</MenuItem>
+                        ))}
+                      </TextField>
+                    )}
+                    <TextField
+                      label="Nombre completo"
+                      value={inquilinoForm.name}
+                      onChange={(e) => setInquilinoForm((prev) => ({ ...prev, name: e.target.value }))}
+                      fullWidth
+                      required
+                    />
+                    <TextField
+                      label="Email"
+                      type="email"
+                      value={inquilinoForm.email}
+                      onChange={(e) => setInquilinoForm((prev) => ({ ...prev, email: e.target.value }))}
+                      fullWidth
+                      required
+                    />
+                    <TextField
+                      label="Teléfono (opcional)"
+                      value={inquilinoForm.phoneNumber}
+                      onChange={(e) => setInquilinoForm((prev) => ({ ...prev, phoneNumber: e.target.value }))}
+                      fullWidth
+                      placeholder="+54 11 1234-5678"
+                    />
+                    <TextField
+                      label={editInquilinoId ? 'Nueva contraseña (dejar vacío para no cambiar)' : 'Contraseña'}
+                      type="password"
+                      value={inquilinoForm.password}
+                      onChange={(e) => setInquilinoForm((prev) => ({ ...prev, password: e.target.value }))}
+                      fullWidth
+                      required={!editInquilinoId}
+                    />
+                  </Stack>
+                </DialogContent>
+                <DialogActions sx={{ px: 3, pb: 2 }}>
+                  <Button onClick={() => setInquilinoDialogOpen(false)}>Cancelar</Button>
+                  <Button
+                    variant="contained"
+                    onClick={handleSaveInquilino}
+                    disabled={
+                      !inquilinoForm.name ||
+                      !inquilinoForm.email ||
+                      (!editInquilinoId && !inquilinoForm.password) ||
+                      (!editInquilinoId && user?.role === 'admin' && !inquilinoForm.consorcioId)
+                    }
+                  >
+                    {editInquilinoId ? 'Guardar cambios' : 'Crear inquilino'}
+                  </Button>
+                </DialogActions>
+              </Dialog>
 
               <Fade in={viewMode === 'reportes'} mountOnEnter unmountOnExit timeout={220}>
                 <Card sx={{ borderRadius: 4 }}>
