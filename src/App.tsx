@@ -2351,9 +2351,9 @@ interface ManagerApiResponse extends ManagedUser {}
     },
     {
       key: 'configuracion',
-      title: 'Configuración',
-      subtitle: 'Integraciones y notificaciones',
-      meta: 'WhatsApp y Mercado Pago',
+      title: user?.role === 'manager' ? 'Recordatorio del consorcio' : 'Configuración',
+      subtitle: user?.role === 'manager' ? 'Recordatorios del consorcio' : 'Integraciones y notificaciones',
+      meta: user?.role === 'manager' ? '' : 'WhatsApp y Mercado Pago',
       visible: user?.role === 'admin' || user?.role === 'manager',
     },
     {
@@ -2385,7 +2385,10 @@ interface ManagerApiResponse extends ManagedUser {}
     data: 'Tablas',
     admin: 'Administración',
   };
-  const viewTitle = viewTitleByMode[viewMode];
+  const viewTitle =
+    viewMode === 'configuracion' && user?.role === 'manager'
+      ? 'Recordatorio del consorcio'
+      : viewTitleByMode[viewMode];
 
   const navIconByView: Record<ViewMode, ReactNode> = {
     unidades: <ApartmentIcon fontSize="small" />,
@@ -2632,7 +2635,7 @@ interface ManagerApiResponse extends ManagedUser {}
                             variant={viewMode === item.key ? 'contained' : 'outlined'}
                             onClick={() => selectView(item.key)}
                             sx={{
-                              justifyContent: 'space-between',
+                              justifyContent: item.meta ? 'space-between' : 'flex-start',
                               py: 1.3,
                               textTransform: 'none',
                               borderRadius: 2,
@@ -2646,9 +2649,11 @@ interface ManagerApiResponse extends ManagedUser {}
                                 {item.subtitle}
                               </Typography>
                             </Box>
-                            <Typography variant="caption" sx={{ ml: 1 }}>
-                              {item.meta}
-                            </Typography>
+                            {item.meta ? (
+                              <Typography variant="caption" sx={{ ml: 1 }}>
+                                {item.meta}
+                              </Typography>
+                            ) : null}
                           </Button>
                         ))}
                     </Stack>
@@ -3802,7 +3807,7 @@ interface ManagerApiResponse extends ManagedUser {}
                     <Stack spacing={2.5}>
                       <Box>
                         <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
-                          Configuración
+                          {canManageIntegraciones ? 'Configuración' : 'Recordatorios'}
                         </Typography>
                         <Typography variant="h5">
                           {canManageIntegraciones ? 'Integraciones, WhatsApp y notificaciones' : 'Recordatorios del consorcio'}
