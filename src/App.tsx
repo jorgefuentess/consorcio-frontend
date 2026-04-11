@@ -2508,7 +2508,7 @@ interface ManagerApiResponse extends ManagedUser {}
                 </IconButton>
               )}
               <Box>
-                <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: -0.4, fontSize: { xs: '1.9rem', sm: '2.125rem' } }}>Gestión de Expensas</Typography>
+                <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: -0.4, fontSize: { xs: '1.9rem', sm: '2.125rem' } }}>Gestión de Consorcios</Typography>
                 {token && (
                   <Typography variant="body2" color="text.secondary">
                     Sección activa: {viewTitle}
