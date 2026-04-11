@@ -1429,7 +1429,9 @@ interface ManagerApiResponse extends ManagedUser {}
         },
       );
       setRecordatorioResultado(data);
-      await handleLoadNotificationHistory();
+      if (user?.role === 'admin') {
+        await handleLoadNotificationHistory();
+      }
       setMessage('');
     } catch (error: any) {
       const errorMsg = error?.response?.data?.message || error?.message || 'No se pudieron enviar recordatorios';
@@ -2304,6 +2306,7 @@ interface ManagerApiResponse extends ManagedUser {}
     meta: string;
     visible: boolean;
   }> = [
+    
     {
       key: 'unidades',
       title: 'Unidades',
@@ -2351,7 +2354,7 @@ interface ManagerApiResponse extends ManagedUser {}
       title: 'Configuración',
       subtitle: 'Integraciones y notificaciones',
       meta: 'WhatsApp y Mercado Pago',
-      visible: user?.role === 'admin',
+      visible: user?.role === 'admin' || user?.role === 'manager',
     },
     {
       key: 'data',
@@ -2368,6 +2371,8 @@ interface ManagerApiResponse extends ManagedUser {}
       visible: user?.role === 'admin',
     },
   ];
+
+  const canManageIntegraciones = user?.role === 'admin';
 
   const viewTitleByMode: Record<ViewMode, string> = {
     unidades: 'Unidades',
@@ -2473,15 +2478,17 @@ interface ManagerApiResponse extends ManagedUser {}
       return;
     }
 
-    if (user?.role === 'admin' && !reporteConsorcioId) {
+    if (user?.role !== 'admin') {
+      return;
+    }
+
+    if (!reporteConsorcioId) {
       return;
     }
 
     void handleLoadWhatsappHealth();
 
-    if (user?.role === 'admin') {
-      void handleLoadConsorcioIntegracion();
-    }
+    void handleLoadConsorcioIntegracion();
   }, [token, user?.role, viewMode, reporteConsorcioId]);
 
   return (
@@ -3797,26 +3804,32 @@ interface ManagerApiResponse extends ManagedUser {}
                         <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
                           Configuración
                         </Typography>
-                        <Typography variant="h5">Integraciones, WhatsApp y notificaciones</Typography>
+                        <Typography variant="h5">
+                          {canManageIntegraciones ? 'Integraciones, WhatsApp y notificaciones' : 'Recordatorios del consorcio'}
+                        </Typography>
                         <Typography color="text.secondary">
-                          Gestiona claves por consorcio y valida envíos desde un panel administrativo.
+                          {canManageIntegraciones
+                            ? 'Gestiona claves por consorcio y valida envíos desde un panel administrativo.'
+                            : 'Envía recordatorios de pagos pendientes para tu consorcio.'}
                         </Typography>
                       </Box>
 
                       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-                        <TextField
-                          select
-                          label="Consorcio"
-                          value={reporteConsorcioId}
-                          onChange={(event) => setReporteConsorcioId(event.target.value)}
-                          fullWidth
-                        >
-                          {consorcios.map((consorcio) => (
-                            <MenuItem key={consorcio.id} value={consorcio.id}>
-                              {consorcio.nombre}
-                            </MenuItem>
-                          ))}
-                        </TextField>
+                        {canManageIntegraciones && (
+                          <TextField
+                            select
+                            label="Consorcio"
+                            value={reporteConsorcioId}
+                            onChange={(event) => setReporteConsorcioId(event.target.value)}
+                            fullWidth
+                          >
+                            {consorcios.map((consorcio) => (
+                              <MenuItem key={consorcio.id} value={consorcio.id}>
+                                {consorcio.nombre}
+                              </MenuItem>
+                            ))}
+                          </TextField>
+                        )}
 
                         <TextField
                           label="Período"
@@ -3830,7 +3843,11 @@ interface ManagerApiResponse extends ManagedUser {}
                         <Button
                           variant="outlined"
                           onClick={handleSendPendingReminders}
-                          disabled={recordatorioLoading || !reportePeriodo || !reporteConsorcioId}
+                          disabled={
+                            recordatorioLoading ||
+                            !reportePeriodo ||
+                            (canManageIntegraciones && !reporteConsorcioId)
+                          }
                         >
                           {recordatorioLoading ? 'Enviando...' : 'Recordar pendientes'}
                         </Button>
@@ -3842,6 +3859,8 @@ interface ManagerApiResponse extends ManagedUser {}
                         </Alert>
                       )}
 
+                      {canManageIntegraciones && (
+                        <>
                       <Paper sx={{ p: 1.5, borderRadius: 2.5, border: '1px solid #d8e6df', backgroundColor: '#f9fcfb' }}>
                         <Stack spacing={1.2}>
                           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1}>
@@ -4106,6 +4125,8 @@ interface ManagerApiResponse extends ManagedUser {}
                           )}
                         </Stack>
                       </Paper>
+                        </>
+                      )}
                     </Stack>
                   </CardContent>
                 </Card>
