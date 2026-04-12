@@ -1579,23 +1579,6 @@ interface ManagerApiResponse extends ManagedUser {}
     }
   };
 
-  const handleSyncPagoOnlineManual = async (pagoId: string) => {
-    try {
-      const { data } = await apiClient.post<Pago>(`/pagos/${pagoId}/mercadopago/sync`);
-      if (data.estado === 'aprobado') {
-        setMessage('Pago sincronizado y aprobado.');
-      } else if (data.estado === 'rechazado') {
-        setMessage('Pago sincronizado: Mercado Pago lo marcó como rechazado.');
-      } else {
-        setMessage('Pago sigue pendiente en Mercado Pago. Intenta nuevamente en unos minutos.');
-      }
-      await loadAllData('owner');
-    } catch (error: any) {
-      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo sincronizar el pago online';
-      setMessage(`Error: ${errorMsg}`);
-    }
-  };
-
   const latestOwnerPayments = [...pagos]
     .sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
     .slice(0, 8);
@@ -4134,16 +4117,6 @@ interface ManagerApiResponse extends ManagedUser {}
                                     <Typography variant="caption" color="text.secondary">
                                       Referencia: {pago.referencia ?? '-'}
                                     </Typography>
-                                    {pago.metodo === 'online' && pago.estado === 'pendiente' && (
-                                      <Button
-                                        size="small"
-                                        variant="outlined"
-                                        sx={{ alignSelf: 'flex-start' }}
-                                        onClick={() => handleSyncPagoOnlineManual(pago.id)}
-                                      >
-                                        Sincronizar ahora
-                                      </Button>
-                                    )}
                                     {pago.comprobanteUrl && (
                                       <Button size="small" sx={{ alignSelf: 'flex-start' }} onClick={() => handleOpenComprobante(pago.comprobanteUrl)}>
                                         Ver comprobante
@@ -4175,18 +4148,11 @@ interface ManagerApiResponse extends ManagedUser {}
                                       <TableCell>{pago.metodo}</TableCell>
                                       <TableCell>{pago.referencia ?? '-'}</TableCell>
                                       <TableCell>
-                                        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-                                          {pago.metodo === 'online' && pago.estado === 'pendiente' && (
-                                            <Button size="small" variant="outlined" onClick={() => handleSyncPagoOnlineManual(pago.id)}>
-                                              Sincronizar
-                                            </Button>
-                                          )}
-                                          {pago.comprobanteUrl ? (
-                                            <Button size="small" onClick={() => handleOpenComprobante(pago.comprobanteUrl)}>Ver comprobante</Button>
-                                          ) : (
-                                            '-'
-                                          )}
-                                        </Stack>
+                                        {pago.comprobanteUrl ? (
+                                          <Button size="small" onClick={() => handleOpenComprobante(pago.comprobanteUrl)}>Ver comprobante</Button>
+                                        ) : (
+                                          '-'
+                                        )}
                                       </TableCell>
                                     </TableRow>
                                   ))}
