@@ -568,6 +568,22 @@ interface ManagerApiResponse extends ManagedUser {}
     setMobileCardActions([]);
   };
 
+  const clearRoleScopedData = () => {
+    setConsorcios([]);
+    setUnidades([]);
+    setGastos([]);
+    setExpensas([]);
+    setPagos([]);
+    setAlquileres([]);
+    setContratos([]);
+    setInquilinos([]);
+    setOwners([]);
+    setManagers([]);
+    setNotificacionesHistorial([]);
+    setReporteResumen(null);
+    setWhatsappHealth(null);
+  };
+
   const runMobileCardAction = (action: () => void) => {
     closeMobileCardActions();
     action();
@@ -594,6 +610,7 @@ interface ManagerApiResponse extends ManagedUser {}
     setMobileGastosDisplayCount(20);
     setMobileExpensasDisplayCount(20);
     setMobilePagosDisplayCount(20);
+    clearRoleScopedData();
     setAuthToken(null);
   };
 
@@ -615,6 +632,7 @@ interface ManagerApiResponse extends ManagedUser {}
       setManualPaymentExpensa(null);
       setManualComprobanteFile(null);
       setMobileMenuOpen(false);
+      clearRoleScopedData();
       await loadAllData(data.user.role);
     } catch {
       setMessage('No se pudo iniciar sesión');
@@ -626,11 +644,30 @@ interface ManagerApiResponse extends ManagedUser {}
 
     try {
       if (activeRole === 'owner' || activeRole === 'tenant') {
-        const [expensasResponse, pagosResponse, alquileresResponse] = await Promise.all([
+        // Limpiamos primero para evitar mostrar datos de otra sesión/rol mientras carga.
+        setConsorcios([]);
+        setUnidades([]);
+        setGastos([]);
+        setOwners([]);
+        setManagers([]);
+        setContratos([]);
+        setInquilinos([]);
+        setNotificacionesHistorial([]);
+        setReporteResumen(null);
+        setWhatsappHealth(null);
+        setExpensas([]);
+        setPagos([]);
+        setAlquileres([]);
+
+        const [expensasResponse, pagosResponse] = await Promise.all([
           apiClient.get<ExpensaApiResponse[]>('/expensas'),
           apiClient.get<PagoApiResponse[]>('/pagos'),
-          apiClient.get<AlquilerApiResponse[]>('/alquileres'),
         ]);
+
+        const alquileresResponse =
+          activeRole === 'tenant'
+            ? await apiClient.get<AlquilerApiResponse[]>('/alquileres')
+            : { data: [] as AlquilerApiResponse[] };
 
         const nextExpensas = expensasResponse.data.map((expensa) => ({
           ...expensa,
@@ -648,15 +685,9 @@ interface ManagerApiResponse extends ManagedUser {}
           monto: toNumber(alquiler.monto),
         }));
 
-        setConsorcios([]);
-        setUnidades([]);
-        setGastos([]);
         setExpensas(nextExpensas);
         setPagos(nextPagos);
         setAlquileres(nextAlquileres);
-        setReporteResumen(null);
-        setNotificacionesHistorial([]);
-        setWhatsappHealth(null);
         setMobileUnidadesDisplayCount(20);
         setMobileGastosDisplayCount(20);
         setMobileExpensasDisplayCount(20);
