@@ -350,6 +350,9 @@ type MobileCardAction = {
   tone?: 'default' | 'danger';
 };
 
+const SESSION_TOKEN_KEY = 'expensas_token';
+const SESSION_USER_KEY = 'expensas_user';
+
 function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -590,6 +593,9 @@ interface ManagerApiResponse extends ManagedUser {}
   };
 
   const resetSession = () => {
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+    localStorage.removeItem(SESSION_USER_KEY);
+    syncedOnlinePagoIdsRef.current.clear();
     setToken(null);
     setUser(null);
     setEmail('');
@@ -614,6 +620,31 @@ interface ManagerApiResponse extends ManagedUser {}
     setAuthToken(null);
   };
 
+  useEffect(() => {
+    const storedToken = localStorage.getItem(SESSION_TOKEN_KEY);
+    const storedUserRaw = localStorage.getItem(SESSION_USER_KEY);
+
+    if (!storedToken || !storedUserRaw) {
+      return;
+    }
+
+    try {
+      const storedUser = JSON.parse(storedUserRaw) as AuthUser;
+      setToken(storedToken);
+      setUser(storedUser);
+      setAuthToken(storedToken);
+
+      const isEndUser = storedUser.role === 'owner' || storedUser.role === 'tenant';
+      setCurrentStep(isEndUser ? 4 : 1);
+      setViewMode(isEndUser ? 'propietario' : 'unidades');
+      void loadAllData(storedUser.role);
+    } catch {
+      localStorage.removeItem(SESSION_TOKEN_KEY);
+      localStorage.removeItem(SESSION_USER_KEY);
+      setAuthToken(null);
+    }
+  }, []);
+
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     try {
@@ -621,6 +652,8 @@ interface ManagerApiResponse extends ManagedUser {}
         email,
         password,
       });
+      localStorage.setItem(SESSION_TOKEN_KEY, data.accessToken);
+      localStorage.setItem(SESSION_USER_KEY, JSON.stringify(data.user));
       setToken(data.accessToken);
       setUser(data.user);
       setAuthToken(data.accessToken);
@@ -1543,6 +1576,23 @@ interface ManagerApiResponse extends ManagedUser {}
     if (latestSyncedPago) {
       setOwnerPaymentReceipt(latestSyncedPago);
       await loadAllData('owner');
+    }
+  };
+
+  const handleSyncPagoOnlineManual = async (pagoId: string) => {
+    try {
+      const { data } = await apiClient.post<Pago>(`/pagos/${pagoId}/mercadopago/sync`);
+      if (data.estado === 'aprobado') {
+        setMessage('Pago sincronizado y aprobado.');
+      } else if (data.estado === 'rechazado') {
+        setMessage('Pago sincronizado: Mercado Pago lo marcó como rechazado.');
+      } else {
+        setMessage('Pago sigue pendiente en Mercado Pago. Intenta nuevamente en unos minutos.');
+      }
+      await loadAllData('owner');
+    } catch (error: any) {
+      const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo sincronizar el pago online';
+      setMessage(`Error: ${errorMsg}`);
     }
   };
 
@@ -4084,6 +4134,16 @@ interface ManagerApiResponse extends ManagedUser {}
                                     <Typography variant="caption" color="text.secondary">
                                       Referencia: {pago.referencia ?? '-'}
                                     </Typography>
+                                    {pago.metodo === 'online' && pago.estado === 'pendiente' && (
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        sx={{ alignSelf: 'flex-start' }}
+                                        onClick={() => handleSyncPagoOnlineManual(pago.id)}
+                                      >
+                                        Sincronizar ahora
+                                      </Button>
+                                    )}
                                     {pago.comprobanteUrl && (
                                       <Button size="small" sx={{ alignSelf: 'flex-start' }} onClick={() => handleOpenComprobante(pago.comprobanteUrl)}>
                                         Ver comprobante
@@ -4115,11 +4175,18 @@ interface ManagerApiResponse extends ManagedUser {}
                                       <TableCell>{pago.metodo}</TableCell>
                                       <TableCell>{pago.referencia ?? '-'}</TableCell>
                                       <TableCell>
-                                        {pago.comprobanteUrl ? (
-                                          <Button size="small" onClick={() => handleOpenComprobante(pago.comprobanteUrl)}>Ver comprobante</Button>
-                                        ) : (
-                                          '-'
-                                        )}
+                                        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                                          {pago.metodo === 'online' && pago.estado === 'pendiente' && (
+                                            <Button size="small" variant="outlined" onClick={() => handleSyncPagoOnlineManual(pago.id)}>
+                                              Sincronizar
+                                            </Button>
+                                          )}
+                                          {pago.comprobanteUrl ? (
+                                            <Button size="small" onClick={() => handleOpenComprobante(pago.comprobanteUrl)}>Ver comprobante</Button>
+                                          ) : (
+                                            '-'
+                                          )}
+                                        </Stack>
                                       </TableCell>
                                     </TableRow>
                                   ))}
