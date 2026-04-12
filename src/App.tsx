@@ -1522,15 +1522,19 @@ interface ManagerApiResponse extends ManagedUser {}
     let latestSyncedPago: Pago | null = null;
 
     for (const pago of pendingOnlinePayments) {
-      syncedOnlinePagoIdsRef.current.add(pago.id);
-
       try {
         const { data } = await apiClient.post<Pago>(`/pagos/${pago.id}/mercadopago/sync`);
-        latestSyncedPago = {
+        const syncedPago = {
           ...data,
           monto: toNumber((data as unknown as { monto: string | number }).monto),
           unidadNumero: data.unidad?.numero,
         };
+
+        // Solo dejamos de reintentar cuando el estado deja de estar pendiente.
+        if (syncedPago.estado !== 'pendiente') {
+          syncedOnlinePagoIdsRef.current.add(pago.id);
+          latestSyncedPago = syncedPago;
+        }
       } catch (error) {
         console.error('No se pudo sincronizar el pago online pendiente', pago.id, error);
       }
