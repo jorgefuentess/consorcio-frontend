@@ -47,15 +47,25 @@ import { apiClient, setAuthToken } from './api/client';
 import { appTheme } from './theme';
 import type { AuthResponse, AuthUser, Role } from './types';
 
+type ConsorcioTipo = 'consorcio' | 'inmobiliaria' | 'propietario_individual';
+type ModuloHabilitado = 'consorcio' | 'alquileres';
+type TipoPropiedad = 'departamento' | 'casa' | 'local' | 'terreno' | 'cochera' | 'otro';
+type UnidadFormTipo = TipoPropiedad | '';
+
 interface Consorcio {
   id: string;
   nombre: string;
   direccion: string;
+  tipo: ConsorcioTipo;
+  modulos: ModuloHabilitado[];
+  activo: boolean;
 }
 
 interface Unidad {
   id: string;
   numero: string;
+  nombre: string | null;
+  tipo: TipoPropiedad;
   coeficiente: number;
   metrosCuadrados: number | null;
   consorcioId: string;
@@ -68,6 +78,18 @@ interface Gasto {
   monto: number;
   fecha: string;
   consorcioId: string;
+}
+
+interface GastoExtra {
+  id: string;
+  descripcion: string;
+  cantidad: number;
+  fecha: string;
+  consorcioId: string;
+  unidadId: string;
+  unidad?: {
+    numero: string;
+  } | null;
 }
 
 interface Expensa {
@@ -127,6 +149,10 @@ interface GastoApiResponse extends Omit<Gasto, 'monto'> {
   monto: number | string;
 }
 
+interface GastoExtraApiResponse extends Omit<GastoExtra, 'cantidad'> {
+  cantidad: number | string;
+}
+
 interface ExpensaApiResponse extends Omit<Expensa, 'total' | 'unidadNumero'> {
   total: number | string;
   unidad?: {
@@ -148,7 +174,6 @@ interface ExpensaDetalleResponse {
     criterioProrrateo: 'coeficiente' | 'm2';
   };
   resumen: {
-    totalGastos: number;
     cantidadGastos: number;
     pdfUrl: string;
   };
@@ -163,9 +188,16 @@ interface ExpensaDetalleResponse {
 interface ReporteResumen {
   periodo: string;
   consorcioId: string;
+  modules?: {
+    consorcio: boolean;
+    alquileres: boolean;
+  };
   totalGastos: number;
   totalExpensas: number;
   totalPagos: number;
+  contratosActivos?: number;
+  totalAlquileresPeriodo?: number;
+  totalPagosAlquiler?: number;
 }
 
 interface RecordatorioPendientesResponse {
@@ -295,6 +327,7 @@ interface ContratoAlquiler {
   montoMensual: number;
   diaVencimiento: number;
   activo: boolean;
+  contratoDigitalUrl?: string | null;
   createdAt: string;
   unidad?: { numero: string };
   inquilino?: { id: string; name: string; email: string };
@@ -310,9 +343,35 @@ interface InquilinoUser {
 
 const roleLabels: Record<Role, string> = {
   admin: 'Administrador general',
-  manager: 'Administrador de consorcio',
+  manager: 'Administrador de organización',
   owner: 'Propietario',
   tenant: 'Inquilino',
+};
+
+const consorcioTipoLabels: Record<ConsorcioTipo, string> = {
+  consorcio: 'Consorcio',
+  inmobiliaria: 'Inmobiliaria',
+  propietario_individual: 'Propietario individual',
+};
+
+const moduloLabels: Record<ModuloHabilitado, string> = {
+  consorcio: 'Consorcio',
+  alquileres: 'Alquileres',
+};
+
+const tipoPropiedadLabels: Record<TipoPropiedad, string> = {
+  departamento: 'Departamento',
+  casa: 'Casa',
+  local: 'Local',
+  terreno: 'Terreno',
+  cochera: 'Cochera',
+  otro: 'Otro',
+};
+
+const consorcioTipoDescriptions: Record<ConsorcioTipo, string> = {
+  consorcio: 'Ideal para administrar edificios con gastos, expensas y propietarios.',
+  inmobiliaria: 'Ideal para administrar contratos y cobros de alquileres.',
+  propietario_individual: 'Ideal para dueños que administran pocas propiedades de forma directa.',
 };
 
 const notificationTypeLabels: Record<string, string> = {
@@ -342,8 +401,8 @@ const formatMoney = (value: number) =>
 
 const toNumber = (value: number | string) => Number(value);
 
-type ViewMode = 'unidades' | 'gastos' | 'expensas' | 'pagos' | 'propietario' | 'alquiler' | 'reportes' | 'configuracion' | 'data' | 'admin';
-type DataTab = 'consorcios' | 'unidades' | 'gastos' | 'expensas' | 'pagos';
+type ViewMode = 'unidades' | 'gastos' | 'gastosExtras' | 'expensas' | 'pagos' | 'propietario' | 'alquiler' | 'reportes' | 'configuracion' | 'data' | 'admin';
+type DataTab = 'consorcios' | 'unidades' | 'gastos' | 'gastosExtras' | 'expensas' | 'pagos';
 type MobileCardAction = {
   label: string;
   onClick: () => void;
@@ -352,6 +411,30 @@ type MobileCardAction = {
 
 const SESSION_TOKEN_KEY = 'expensas_token';
 const SESSION_USER_KEY = 'expensas_user';
+
+const getInitialViewByRole = (role: Role): ViewMode => {
+  if (role === 'owner' || role === 'tenant') {
+    return 'propietario';
+  }
+
+  if (role === 'admin') {
+    return 'admin';
+  }
+
+  return 'unidades';
+};
+
+const getInitialStepByRole = (role: Role): number => {
+  if (role === 'owner' || role === 'tenant') {
+    return 4;
+  }
+
+  if (role === 'admin') {
+    return 0;
+  }
+
+  return 1;
+};
 
 function App() {
   const [email, setEmail] = useState('');
@@ -396,13 +479,17 @@ function App() {
   const [showGastoForm, setShowGastoForm] = useState(false);
   const [showExpensaForm, setShowExpensaForm] = useState(false);
   const [showPagoForm, setShowPagoForm] = useState(false);
+  const [gastoExtraDialogOpen, setGastoExtraDialogOpen] = useState(false);
   const [editingUnidadId, setEditingUnidadId] = useState<string | null>(null);
   const [editingGastoId, setEditingGastoId] = useState<string | null>(null);
+  const [editingGastoExtraId, setEditingGastoExtraId] = useState<string | null>(null);
   const [editingPagoId, setEditingPagoId] = useState<string | null>(null);
   const [editingOwnerId, setEditingOwnerId] = useState<string | null>(null);
   const [ownerModalOpen, setOwnerModalOpen] = useState(false);
   const [editingManagerId, setEditingManagerId] = useState<string | null>(null);
   const [managerModalOpen, setManagerModalOpen] = useState(false);
+  const [consorcioModalOpen, setConsorcioModalOpen] = useState(false);
+  const [editingConsorcioId, setEditingConsorcioId] = useState<string | null>(null);
   const [managerToDelete, setManagerToDelete] = useState<ManagerApiResponse | null>(null);
   const [ownerPaymentReceipt, setOwnerPaymentReceipt] = useState<Pago | null>(null);
   const [mobileCardActionsAnchorEl, setMobileCardActionsAnchorEl] = useState<HTMLElement | null>(null);
@@ -414,15 +501,16 @@ function App() {
   const syncedOnlinePagoIdsRef = useRef<Set<string>>(new Set());
   const [manualPaymentExpensa, setManualPaymentExpensa] = useState<Expensa | null>(null);
   const [manualComprobanteFile, setManualComprobanteFile] = useState<File | null>(null);
-  const [unidadEditForm, setUnidadEditForm] = useState({ numero: '', coeficiente: '', metrosCuadrados: '', propietarioId: '' });
+  const [unidadEditForm, setUnidadEditForm] = useState({ numero: '', nombre: '', tipo: 'departamento' as TipoPropiedad, coeficiente: '', metrosCuadrados: '', propietarioId: '' });
   const [gastoEditForm, setGastoEditForm] = useState({ descripcion: '', monto: '', fecha: '' });
   const [pagoEditForm, setPagoEditForm] = useState({ monto: '', estado: 'pendiente', metodo: 'manual' as 'manual' | 'online', referencia: '', observacion: '' });
-  const [ownerEditForm, setOwnerEditForm] = useState({ name: '', email: '', phoneNumber: '', password: '', unidadId: '' });
+  const [ownerEditForm, setOwnerEditForm] = useState({ name: '', email: '', phoneNumber: '', password: '', unidadId: '', consorcioId: '' });
   const [selectedDetalleExpensa, setSelectedDetalleExpensa] = useState<ExpensaDetalleResponse | null>(null);
 
   const [consorcios, setConsorcios] = useState<Consorcio[]>([]);
   const [unidades, setUnidades] = useState<Unidad[]>([]);
   const [gastos, setGastos] = useState<Gasto[]>([]);
+  const [gastosExtras, setGastosExtras] = useState<GastoExtra[]>([]);
   const [expensas, setExpensas] = useState<Expensa[]>([]);
 interface ManagerApiResponse extends ManagedUser {}
   const [pagos, setPagos] = useState<Pago[]>([]);
@@ -435,6 +523,7 @@ interface ManagerApiResponse extends ManagedUser {}
   const [alquilerReminderResultado, setAlquilerReminderResultado] = useState<RecordatorioAlquilerResponse | null>(null);
   const [contratoDialogOpen, setContratoDialogOpen] = useState(false);
   const [editContratoId, setEditContratoId] = useState<string | null>(null);
+  const [contratoDigitalFile, setContratoDigitalFile] = useState<File | null>(null);
   const [contratoForm, setContratoForm] = useState({
     consorcioId: '',
     unidadId: '',
@@ -457,9 +546,13 @@ interface ManagerApiResponse extends ManagedUser {}
   const [consorcioForm, setConsorcioForm] = useState({
     nombre: 'Consorcio Centro',
     direccion: 'Av. Principal 123',
+    tipo: 'consorcio' as ConsorcioTipo,
+    modulos: ['consorcio'] as ModuloHabilitado[],
   });
   const [unidadForm, setUnidadForm] = useState({
     numero: 'A1',
+    nombre: '',
+    tipo: '' as UnidadFormTipo,
     coeficiente: '0.10',
     metrosCuadrados: '45',
     propietarioId: '',
@@ -470,6 +563,13 @@ interface ManagerApiResponse extends ManagedUser {}
     monto: '35000',
     fecha: new Date().toISOString().split('T')[0],
     consorcioId: '',
+  });
+  const [gastoExtraForm, setGastoExtraForm] = useState({
+    descripcion: '',
+    cantidad: '',
+    fecha: new Date().toISOString().split('T')[0],
+    consorcioId: '',
+    unidadId: '',
   });
   const [expensaForm, setExpensaForm] = useState({
     periodo: new Date().toISOString().slice(0, 7),
@@ -510,12 +610,42 @@ interface ManagerApiResponse extends ManagedUser {}
     setReporteConsorcioId(nextConsorcioId);
     setUnidadForm((current) => ({ ...current, consorcioId: nextConsorcioId }));
     setGastoForm((current) => ({ ...current, consorcioId: nextConsorcioId }));
+    setGastoExtraForm((current) => ({ ...current, consorcioId: nextConsorcioId, unidadId: '' }));
     setExpensaForm((current) => ({ ...current, consorcioId: nextConsorcioId }));
   };
 
   const syncSelectedUnidad = (nextUnidadId: string) => {
     setUnidadId(nextUnidadId);
     setPagoForm((current) => ({ ...current, unidadId: nextUnidadId }));
+  };
+
+  const applyConsorcioTipoPreset = (nextTipo: ConsorcioTipo) => {
+    setConsorcioForm((current) => ({
+      ...current,
+      tipo: nextTipo,
+      modulos:
+        nextTipo === 'consorcio'
+          ? ['consorcio']
+          : nextTipo === 'inmobiliaria'
+            ? ['alquileres']
+            : current.modulos.length > 0
+              ? current.modulos
+              : ['alquileres'],
+    }));
+  };
+
+  const toggleConsorcioModulo = (modulo: ModuloHabilitado) => {
+    setConsorcioForm((current) => {
+      const exists = current.modulos.includes(modulo);
+      const next = exists
+        ? current.modulos.filter((item) => item !== modulo)
+        : [...current.modulos, modulo];
+
+      return {
+        ...current,
+        modulos: [...new Set(next)],
+      };
+    });
   };
 
   const getPagoUnidadLabel = (pago: Pago) =>
@@ -575,6 +705,7 @@ interface ManagerApiResponse extends ManagedUser {}
     setConsorcios([]);
     setUnidades([]);
     setGastos([]);
+    setGastosExtras([]);
     setExpensas([]);
     setPagos([]);
     setAlquileres([]);
@@ -634,10 +765,9 @@ interface ManagerApiResponse extends ManagedUser {}
       setUser(storedUser);
       setAuthToken(storedToken);
 
-      const isEndUser = storedUser.role === 'owner' || storedUser.role === 'tenant';
-      setCurrentStep(isEndUser ? 4 : 1);
-      setViewMode(isEndUser ? 'propietario' : 'unidades');
-      void loadAllData(storedUser.role);
+      setCurrentStep(getInitialStepByRole(storedUser.role));
+      setViewMode(getInitialViewByRole(storedUser.role));
+      void loadAllData(storedUser.role, storedUser);
     } catch {
       localStorage.removeItem(SESSION_TOKEN_KEY);
       localStorage.removeItem(SESSION_USER_KEY);
@@ -658,22 +788,27 @@ interface ManagerApiResponse extends ManagedUser {}
       setUser(data.user);
       setAuthToken(data.accessToken);
       setMessage('');
-      const isEndUser = data.user.role === 'owner' || data.user.role === 'tenant';
-      setCurrentStep(isEndUser ? 4 : 1);
-      setViewMode(isEndUser ? 'propietario' : 'unidades');
+      setCurrentStep(getInitialStepByRole(data.user.role));
+      setViewMode(getInitialViewByRole(data.user.role));
       setOwnerPaymentReceipt(null);
       setManualPaymentExpensa(null);
       setManualComprobanteFile(null);
       setMobileMenuOpen(false);
       clearRoleScopedData();
-      await loadAllData(data.user.role);
+      await loadAllData(data.user.role, data.user);
     } catch {
       setMessage('No se pudo iniciar sesión');
     }
   };
 
-  const loadAllData = async (targetRole?: Role) => {
-    const activeRole = targetRole ?? user?.role;
+  const loadAllData = async (targetRole?: Role, targetUser?: AuthUser | null) => {
+    const activeUser = targetUser ?? user;
+    const activeRole = targetRole ?? activeUser?.role;
+
+    // Fallback defensivo para manager: fija consorcio desde sesión antes de cargar módulos.
+    if (activeRole === 'manager' && activeUser?.consorcioId) {
+      syncSelectedConsorcio(activeUser.consorcioId);
+    }
 
     try {
       if (activeRole === 'owner' || activeRole === 'tenant') {
@@ -681,6 +816,7 @@ interface ManagerApiResponse extends ManagedUser {}
         setConsorcios([]);
         setUnidades([]);
         setGastos([]);
+        setGastosExtras([]);
         setOwners([]);
         setManagers([]);
         setContratos([]);
@@ -814,6 +950,29 @@ interface ManagerApiResponse extends ManagedUser {}
       if (!unidadId && nextUnidades.length > 0) {
         syncSelectedUnidad(nextUnidades[0].id);
       }
+
+      const managerConsorcio =
+        activeRole === 'manager'
+          ? nextConsorcios.find((consorcio) => consorcio.id === activeUser?.consorcioId)
+          : null;
+      const shouldLoadGastosExtras =
+        activeRole === 'admin' ||
+        (activeRole === 'manager' && managerConsorcio?.tipo === 'inmobiliaria');
+
+      if (shouldLoadGastosExtras) {
+        try {
+          const gastosExtrasResponse = await apiClient.get<GastoExtraApiResponse[]>('/gastos-extras');
+          const nextGastosExtras = gastosExtrasResponse.data.map((gastoExtra) => ({
+            ...gastoExtra,
+            cantidad: toNumber(gastoExtra.cantidad),
+          }));
+          setGastosExtras(nextGastosExtras);
+        } catch {
+          setGastosExtras([]);
+        }
+      } else {
+        setGastosExtras([]);
+      }
     } catch (error) {
       console.error('Error cargando datos:', error);
     }
@@ -841,23 +1000,54 @@ interface ManagerApiResponse extends ManagedUser {}
   const handleCreateConsorcio = () =>
     runAction(
       async () => {
+        if (editingConsorcioId) {
+          const { data } = await apiClient.patch<Consorcio>(`/consorcios/${editingConsorcioId}`, {
+            nombre: consorcioForm.nombre,
+            direccion: consorcioForm.direccion,
+            tipo: consorcioForm.tipo,
+            modulos: consorcioForm.modulos,
+          });
+          setConsorcioModalOpen(false);
+          return data;
+        }
         const { data } = await apiClient.post<Consorcio>('/consorcios', {
           nombre: consorcioForm.nombre,
           direccion: consorcioForm.direccion,
+          tipo: consorcioForm.tipo,
+          modulos: consorcioForm.modulos,
         });
+        setConsorcioModalOpen(false);
         syncSelectedConsorcio(data.id);
         return data;
       },
-      'Consorcio creado',
+      editingConsorcioId ? 'Organización actualizada' : 'Organización creada',
       (consorcio) => ({
-        title: 'Consorcio creado',
-        description: 'Este consorcio quedó disponible para crear unidades, gastos y expensas sobre el mismo edificio.',
+        title: editingConsorcioId ? 'Organización actualizada' : 'Organización creada',
+        description: editingConsorcioId
+          ? 'Los datos de la organización fueron actualizados.'
+          : 'La organización quedó disponible para crear unidades, gastos y expensas.',
         fields: [
           { label: 'Nombre', value: consorcio.nombre },
           { label: 'Dirección', value: consorcio.direccion },
-          { label: 'ID', value: consorcio.id },
+          { label: 'Tipo', value: consorcioTipoLabels[consorcio.tipo] },
+          {
+            label: 'Módulos',
+            value: consorcio.modulos.map((modulo) => moduloLabels[modulo]).join(', '),
+          },
         ],
       }),
+    );
+
+  const handleToggleConsorcioActivo = (consorcio: Consorcio) =>
+    runAction(
+      async () => {
+        const { data } = await apiClient.patch<Consorcio>(`/consorcios/${consorcio.id}`, {
+          activo: !consorcio.activo,
+        });
+        return data;
+      },
+      consorcio.activo ? 'Organización desactivada' : 'Organización activada',
+      () => ({}),
     );
 
   const handleCreateUnidad = () =>
@@ -869,9 +1059,20 @@ interface ManagerApiResponse extends ManagedUser {}
   const handleCreateUnidadWithFlow = (stayOnStep: boolean) =>
     runAction(
       async () => {
+        const selectedConsorcio = consorcios.find((c) => c.id === unidadForm.consorcioId);
+        const tipoUnidad: TipoPropiedad =
+          selectedConsorcio?.tipo === 'consorcio'
+            ? 'departamento'
+            : (unidadForm.tipo as TipoPropiedad);
+        const coeficienteUnidad = tipoUnidad === 'departamento'
+          ? Number(unidadForm.coeficiente)
+          : 0;
+
         const { data } = await apiClient.post<Unidad>('/unidades', {
           numero: unidadForm.numero,
-          coeficiente: Number(unidadForm.coeficiente),
+          nombre: unidadForm.nombre.trim() || undefined,
+          tipo: tipoUnidad,
+          coeficiente: coeficienteUnidad,
           metrosCuadrados:
             unidadForm.metrosCuadrados.trim() === ''
               ? undefined
@@ -884,6 +1085,7 @@ interface ManagerApiResponse extends ManagedUser {}
         setUnidadForm((current) => ({
           ...current,
           numero: '',
+          nombre: '',
         }));
         if (!stayOnStep) {
           setShowUnidadForm(false);
@@ -896,6 +1098,8 @@ interface ManagerApiResponse extends ManagedUser {}
         description: 'La unidad quedó asociada al consorcio elegido y ya se puede usar en el paso de pagos.',
         fields: [
           { label: 'Número', value: unidad.numero },
+          { label: 'Nombre', value: unidad.nombre?.trim() || 'Sin nombre' },
+          { label: 'Tipo', value: tipoPropiedadLabels[unidad.tipo] },
           { label: 'Coeficiente', value: unidad.coeficiente.toFixed(2) },
           {
             label: 'm2',
@@ -909,6 +1113,23 @@ interface ManagerApiResponse extends ManagedUser {}
         ],
       }),
     );
+
+  const handleOpenCreateConsorcio = () => {
+    setEditingConsorcioId(null);
+    setConsorcioForm({ nombre: '', direccion: '', tipo: 'consorcio', modulos: ['consorcio'] });
+    setConsorcioModalOpen(true);
+  };
+
+  const handleOpenEditConsorcio = (consorcio: Consorcio) => {
+    setEditingConsorcioId(consorcio.id);
+    setConsorcioForm({
+      nombre: consorcio.nombre,
+      direccion: consorcio.direccion,
+      tipo: consorcio.tipo,
+      modulos: [...consorcio.modulos],
+    });
+    setConsorcioModalOpen(true);
+  };
 
   const handleOpenCreateManager = () => {
     setEditingManagerId(null);
@@ -944,6 +1165,7 @@ interface ManagerApiResponse extends ManagedUser {}
       phoneNumber: owner.phoneNumber ?? '',
       password: '',
       unidadId: assignedUnidad?.id ?? '',
+      consorcioId: assignedUnidad?.consorcioId ?? owner.consorcioId ?? '',
     });
     setOwnerModalOpen(true);
   };
@@ -956,6 +1178,7 @@ interface ManagerApiResponse extends ManagedUser {}
       phoneNumber: '',
       password: 'owner123',
       unidadId: '',
+      consorcioId: user?.role === 'manager' ? user.consorcioId ?? '' : consorcioId || consorcios[0]?.id || '',
     });
     setOwnerModalOpen(true);
   };
@@ -970,19 +1193,20 @@ interface ManagerApiResponse extends ManagedUser {}
             phoneNumber: ownerEditForm.phoneNumber.trim() || null,
             password: ownerEditForm.password.trim() || undefined,
             unidadId: ownerEditForm.unidadId || null,
+            consorcioId: ownerEditForm.consorcioId || undefined,
           });
           setOwnerModalOpen(false);
           setEditingOwnerId(null);
           return data;
         }
 
-        const { data } = await apiClient.post<ManagedUser>('/users', {
+        const { data } = await apiClient.post<ManagedUser>('/users/owners', {
           name: ownerEditForm.name,
           email: ownerEditForm.email,
           phoneNumber: ownerEditForm.phoneNumber.trim() || null,
           password: ownerEditForm.password,
-          role: 'owner',
           unidadId: ownerEditForm.unidadId || undefined,
+          consorcioId: ownerEditForm.consorcioId || undefined,
         });
         setOwnerModalOpen(false);
         return data;
@@ -997,6 +1221,10 @@ interface ManagerApiResponse extends ManagedUser {}
           { label: 'Nombre', value: ownerEditForm.name },
           { label: 'Email', value: ownerEditForm.email },
           { label: 'WhatsApp', value: ownerEditForm.phoneNumber || 'No informado' },
+          {
+            label: 'Organización',
+            value: consorcios.find((consorcio) => consorcio.id === ownerEditForm.consorcioId)?.nombre ?? 'Sin asignar',
+          },
           {
             label: 'Unidad',
             value: unidades.find((unidad) => unidad.id === ownerEditForm.unidadId)?.numero ?? 'Sin asignar',
@@ -1126,6 +1354,85 @@ interface ManagerApiResponse extends ManagedUser {}
       }),
     );
 
+  const handleOpenCreateGastoExtra = () => {
+    setEditingGastoExtraId(null);
+    setGastoExtraForm({
+      descripcion: '',
+      cantidad: '',
+      fecha: new Date().toISOString().split('T')[0],
+      consorcioId:
+        user?.role === 'manager'
+          ? user.consorcioId ?? consorcioId
+          : consorcioId || reporteConsorcioId || consorcios[0]?.id || '',
+      unidadId: '',
+    });
+    setGastoExtraDialogOpen(true);
+  };
+
+  const handleStartEditGastoExtra = (gastoExtra: GastoExtra) => {
+    setEditingGastoExtraId(gastoExtra.id);
+    setGastoExtraForm({
+      descripcion: gastoExtra.descripcion,
+      cantidad: String(gastoExtra.cantidad),
+      fecha: gastoExtra.fecha,
+      consorcioId: gastoExtra.consorcioId,
+      unidadId: gastoExtra.unidadId,
+    });
+    setGastoExtraDialogOpen(true);
+  };
+
+  const handleSaveGastoExtra = () =>
+    runAction(
+      async () => {
+        if (editingGastoExtraId) {
+          const { data } = await apiClient.patch<GastoExtra>(`/gastos-extras/${editingGastoExtraId}`, {
+            descripcion: gastoExtraForm.descripcion,
+            cantidad: Number(gastoExtraForm.cantidad),
+            fecha: gastoExtraForm.fecha,
+            unidadId: gastoExtraForm.unidadId,
+          });
+          setEditingGastoExtraId(null);
+          setGastoExtraDialogOpen(false);
+          return data;
+        }
+
+        const { data } = await apiClient.post<GastoExtra>('/gastos-extras', {
+          descripcion: gastoExtraForm.descripcion,
+          cantidad: Number(gastoExtraForm.cantidad),
+          fecha: gastoExtraForm.fecha,
+          consorcioId: gastoExtraForm.consorcioId,
+          unidadId: gastoExtraForm.unidadId,
+        });
+        setGastoExtraDialogOpen(false);
+        return data;
+      },
+      editingGastoExtraId ? 'Gasto extra actualizado' : 'Gasto extra registrado',
+      (gastoExtra) => ({
+        title: editingGastoExtraId ? 'Gasto extra actualizado' : 'Gasto extra registrado',
+        description: 'El gasto extra quedó asociado a la unidad seleccionada.',
+        fields: [
+          { label: 'Descripción', value: gastoExtra.descripcion },
+          { label: 'Cantidad', value: formatMoney(gastoExtra.cantidad) },
+          { label: 'Fecha', value: new Date(gastoExtra.fecha).toLocaleDateString('es-AR') },
+          { label: 'Unidad', value: unidades.find((u) => u.id === gastoExtra.unidadId)?.numero ?? gastoExtra.unidadId },
+        ],
+      }),
+    );
+
+  const handleDeleteGastoExtra = (id: string) =>
+    runAction(
+      async () => {
+        await apiClient.delete(`/gastos-extras/${id}`);
+        return { id };
+      },
+      'Gasto extra eliminado',
+      () => ({
+        title: 'Gasto extra eliminado',
+        description: 'El registro de gasto extra fue eliminado.',
+        fields: [],
+      }),
+    );
+
   const handleGenerateExpensa = () =>
     runAction(
       async () => {
@@ -1187,6 +1494,8 @@ interface ManagerApiResponse extends ManagedUser {}
     setEditingUnidadId(unidad.id);
     setUnidadEditForm({
       numero: unidad.numero,
+      nombre: unidad.nombre ?? '',
+      tipo: unidad.tipo,
       coeficiente: String(unidad.coeficiente),
       metrosCuadrados: unidad.metrosCuadrados == null ? '' : String(unidad.metrosCuadrados),
       propietarioId: unidad.propietarioId ?? '',
@@ -1202,6 +1511,8 @@ interface ManagerApiResponse extends ManagedUser {}
       async () => {
         const { data } = await apiClient.patch<Unidad>(`/unidades/${editingUnidadId}`, {
           numero: unidadEditForm.numero,
+          nombre: unidadEditForm.nombre.trim() || null,
+          tipo: unidadEditForm.tipo,
           coeficiente: Number(unidadEditForm.coeficiente),
           metrosCuadrados:
             unidadEditForm.metrosCuadrados.trim() === ''
@@ -1221,6 +1532,8 @@ interface ManagerApiResponse extends ManagedUser {}
         description: 'Los datos de la unidad se actualizaron correctamente.',
         fields: [
           { label: 'Número', value: unidad.numero },
+          { label: 'Nombre', value: unidad.nombre?.trim() || 'Sin nombre' },
+          { label: 'Tipo', value: tipoPropiedadLabels[unidad.tipo] },
           { label: 'Coeficiente', value: String(unidad.coeficiente) },
           {
             label: 'm2',
@@ -1741,6 +2054,8 @@ interface ManagerApiResponse extends ManagedUser {}
   };
 
   const handleOpenContratoDialog = (contrato?: ContratoAlquiler) => {
+    setContratoDigitalFile(null);
+
     if (contrato) {
       setEditContratoId(contrato.id);
       setContratoForm({
@@ -1772,18 +2087,34 @@ interface ManagerApiResponse extends ManagedUser {}
         montoMensual: parseFloat(contratoForm.montoMensual),
         diaVencimiento: parseInt(contratoForm.diaVencimiento, 10),
       };
+
+      const uploadContratoDigital = async (contratoId: string) => {
+        if (!contratoDigitalFile) {
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', contratoDigitalFile);
+        await apiClient.post(`/alquileres/contratos/${contratoId}/documento`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+      };
+
       if (editContratoId) {
         await apiClient.patch(`/alquileres/contratos/${editContratoId}`, {
           inquilinoId: payload.inquilinoId,
           montoMensual: payload.montoMensual,
           diaVencimiento: payload.diaVencimiento,
         });
+        await uploadContratoDigital(editContratoId);
         setMessage('Contrato actualizado.');
       } else {
-        await apiClient.post('/alquileres/contratos', payload);
+        const { data } = await apiClient.post<ContratoAlquiler>('/alquileres/contratos', payload);
+        await uploadContratoDigital(data.id);
         setMessage('Contrato de alquiler creado.');
       }
       setContratoDialogOpen(false);
+      setContratoDigitalFile(null);
       await loadAllData();
     } catch (error: any) {
       const errorMsg = error?.response?.data?.message || error?.message || 'No se pudo guardar el contrato';
@@ -2007,18 +2338,64 @@ interface ManagerApiResponse extends ManagedUser {}
     if (currentStep === 0) {
       return (
         <Stack spacing={2}>
+          <Typography variant="subtitle2">Tipo de cliente</Typography>
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}>
+            {(Object.keys(consorcioTipoLabels) as ConsorcioTipo[]).map((tipo) => {
+              const selected = consorcioForm.tipo === tipo;
+              return (
+                <Paper
+                  key={`setup-tipo-${tipo}`}
+                  elevation={0}
+                  onClick={() => applyConsorcioTipoPreset(tipo)}
+                  sx={{
+                    p: 1.2,
+                    borderRadius: 2,
+                    border: selected ? '2px solid #2a9d8f' : '1px solid #dce9e4',
+                    backgroundColor: selected ? '#edf7f3' : '#fff',
+                    cursor: 'pointer',
+                    flex: 1,
+                  }}
+                >
+                  <Typography variant="subtitle2">{consorcioTipoLabels[tipo]}</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {consorcioTipoDescriptions[tipo]}
+                  </Typography>
+                </Paper>
+              );
+            })}
+          </Stack>
           <TextField
-            label="Nombre del consorcio"
+            label="Nombre de la organización"
             value={consorcioForm.nombre}
             onChange={(event) => setConsorcioForm((current) => ({ ...current, nombre: event.target.value }))}
             fullWidth
           />
           <TextField
-            label="Dirección"
+            label="Dirección principal"
             value={consorcioForm.direccion}
             onChange={(event) => setConsorcioForm((current) => ({ ...current, direccion: event.target.value }))}
             fullWidth
           />
+          <Stack spacing={0.8}>
+            <Typography variant="subtitle2">Servicios habilitados</Typography>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              {(Object.keys(moduloLabels) as ModuloHabilitado[]).map((modulo) => {
+                const active = consorcioForm.modulos.includes(modulo);
+                return (
+                  <Chip
+                    key={`setup-modulo-${modulo}`}
+                    label={moduloLabels[modulo]}
+                    color={active ? 'primary' : 'default'}
+                    variant={active ? 'filled' : 'outlined'}
+                    onClick={() => toggleConsorcioModulo(modulo)}
+                  />
+                );
+              })}
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Tip: activa ambos servicios si el cliente quiere gestionar consorcios y alquileres en la misma cuenta.
+            </Typography>
+          </Stack>
         </Stack>
       );
     }
@@ -2050,13 +2427,85 @@ interface ManagerApiResponse extends ManagedUser {}
             fullWidth
           />
           <TextField
-            label="Coeficiente"
-            type="number"
-            inputProps={{ min: 0, max: 1, step: 0.01 }}
-            value={unidadForm.coeficiente}
-            onChange={(event) => setUnidadForm((current) => ({ ...current, coeficiente: event.target.value }))}
+            label="Nombre de la propiedad (opcional)"
+            value={unidadForm.nombre}
+            onChange={(event) => setUnidadForm((current) => ({ ...current, nombre: event.target.value }))}
             fullWidth
           />
+{(() => {
+            const formConsorcio = consorcios.find((c) => c.id === unidadForm.consorcioId);
+            const tipoLocked = formConsorcio?.tipo === 'consorcio';
+            return tipoLocked ? (
+              <TextField
+                label="Tipo de propiedad"
+                value={tipoPropiedadLabels[(unidadForm.tipo || 'departamento') as TipoPropiedad]}
+                fullWidth
+                InputProps={{ readOnly: true }}
+                helperText="Fijo para organizaciones de tipo consorcio"
+              />
+            ) : (
+              <TextField
+                select
+                label="Tipo de propiedad"
+                value={unidadForm.tipo}
+                onChange={(event) =>
+                  setUnidadForm((current) => {
+                    const nextTipo = event.target.value as UnidadFormTipo;
+                    if (nextTipo === 'departamento') {
+                      const coeficienteActual = Number(current.coeficiente);
+                      return {
+                        ...current,
+                        tipo: nextTipo,
+                        coeficiente:
+                          Number.isNaN(coeficienteActual) || coeficienteActual <= 0
+                            ? '0.10'
+                            : current.coeficiente,
+                      };
+                    }
+
+                    return {
+                      ...current,
+                      tipo: nextTipo,
+                      coeficiente: '0',
+                    };
+                  })
+                }
+                fullWidth
+              >
+                <MenuItem value="">
+                  <em>Seleccionar tipo</em>
+                </MenuItem>
+                {(Object.keys(tipoPropiedadLabels) as TipoPropiedad[]).map((tipo) => (
+                  <MenuItem key={tipo} value={tipo}>
+                    {tipoPropiedadLabels[tipo]}
+                  </MenuItem>
+                ))}
+              </TextField>
+            );
+          })()}
+          {(() => {
+            const formConsorcio = consorcios.find((c) => c.id === unidadForm.consorcioId);
+            const tipoLocked = formConsorcio?.tipo === 'consorcio';
+            const tipoUnidad = tipoLocked ? 'departamento' : unidadForm.tipo;
+            const requiereCoeficiente = tipoUnidad === 'departamento';
+
+            return (
+              <TextField
+                label="Coeficiente"
+                type="number"
+                inputProps={{ min: 0, max: 1, step: 0.01 }}
+                value={requiereCoeficiente ? unidadForm.coeficiente : '0'}
+                onChange={(event) => setUnidadForm((current) => ({ ...current, coeficiente: event.target.value }))}
+                fullWidth
+                disabled={!requiereCoeficiente}
+                helperText={
+                  requiereCoeficiente
+                    ? 'Obligatorio para departamento.'
+                    : 'No aplica para este tipo de propiedad.'
+                }
+              />
+            );
+          })()}
           <TextField
             label="Metros cuadrados (opcional)"
             type="number"
@@ -2244,30 +2693,38 @@ interface ManagerApiResponse extends ManagedUser {}
     if (currentStep === 0) {
       const isManager = user?.role === 'manager';
       return {
-        title: 'Crear consorcio',
+        title: 'Crear organización cliente',
         description: isManager
-          ? 'El alta de nuevos consorcios corresponde al administrador general. Como manager operas sobre el consorcio ya asignado.'
-          : 'Acá defines el edificio o consorcio. En un esquema multi-edificio, este es el contenedor principal de unidades, gastos y expensas.',
+          ? 'El alta de nuevas organizaciones corresponde al administrador general. Como manager operas sobre la organización ya asignada.'
+          : 'Primero defines el tipo de cliente y los servicios activos. Luego podrás cargar propiedades, contratos, expensas y cobros según corresponda.',
         action: handleCreateConsorcio,
-        buttonLabel: 'Guardar consorcio',
+        buttonLabel: 'Guardar organización',
         disabled:
           isManager ||
           !consorcioForm.nombre.trim() ||
-          !consorcioForm.direccion.trim(),
+          !consorcioForm.direccion.trim() ||
+          consorcioForm.modulos.length === 0,
       };
     }
 
     if (currentStep === 1) {
+      const formConsorcio = consorcios.find((c) => c.id === unidadForm.consorcioId);
+      const tipoLocked = formConsorcio?.tipo === 'consorcio';
+      const tipoUnidad = tipoLocked ? 'departamento' : unidadForm.tipo;
+      const requiereCoeficiente = tipoUnidad === 'departamento';
       return {
         title: 'Crear unidad',
-        description: 'El administrador del consorcio crea las unidades dentro del edificio elegido. Ya puedes cargar número y coeficiente reales.',
+        description: formConsorcio?.tipo === 'inmobiliaria'
+          ? 'Crea las unidades para asociarlas luego a contratos e inquilinos desde Administración de alquileres.'
+          : 'El administrador del consorcio crea las unidades dentro del edificio elegido. Ya puedes cargar número y coeficiente reales.',
         action: handleCreateUnidad,
         buttonLabel: 'Guardar unidad',
         disabled:
           !unidadForm.consorcioId ||
           !unidadForm.numero.trim() ||
-          Number.isNaN(Number(unidadForm.coeficiente)) ||
-          Number(unidadForm.coeficiente) <= 0,
+          (requiereCoeficiente &&
+            (Number.isNaN(Number(unidadForm.coeficiente)) ||
+              Number(unidadForm.coeficiente) <= 0)),
       };
     }
 
@@ -2327,7 +2784,7 @@ interface ManagerApiResponse extends ManagedUser {}
                 <Stack spacing={0.35}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center">
                     <Typography variant="subtitle2" sx={{ fontSize: '0.9rem', lineHeight: 1.2 }}>
-                      Unidad {unidad.numero}
+                      {tipoPropiedadLabels[unidad.tipo]} {unidad.numero}
                     </Typography>
                     <IconButton
                       size="small"
@@ -2342,6 +2799,9 @@ interface ManagerApiResponse extends ManagedUser {}
                       <MoreVertIcon fontSize="small" />
                     </IconButton>
                   </Stack>
+                  <Typography variant="caption" color="text.secondary">
+                    Nombre: {unidad.nombre?.trim() || '-'}
+                  </Typography>
                   <Typography variant="caption" color="text.secondary">
                     Coef: {unidad.coeficiente.toFixed(2)} | m2: {unidad.metrosCuadrados == null ? '-' : unidad.metrosCuadrados.toFixed(2)}
                   </Typography>
@@ -2359,10 +2819,12 @@ interface ManagerApiResponse extends ManagedUser {}
           </Stack>
 
           <TableContainer component={Paper} sx={{ overflowX: 'auto', display: { xs: 'none', md: 'block' } }}>
-            <Table size="small" sx={{ minWidth: 760 }}>
+            <Table size="small" sx={{ minWidth: 920 }}>
               <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
                 <TableRow>
                   <TableCell>Número</TableCell>
+                  <TableCell>Tipo</TableCell>
+                  <TableCell>Nombre</TableCell>
                   <TableCell align="right">Coef.</TableCell>
                   <TableCell align="right">m2</TableCell>
                   <TableCell>Propietario</TableCell>
@@ -2373,6 +2835,8 @@ interface ManagerApiResponse extends ManagedUser {}
                 {unidades.map((unidad) => (
                   <TableRow key={unidad.id}>
                     <TableCell>{unidad.numero}</TableCell>
+                    <TableCell>{tipoPropiedadLabels[unidad.tipo]}</TableCell>
+                    <TableCell>{unidad.nombre?.trim() || '-'}</TableCell>
                     <TableCell align="right">{unidad.coeficiente.toFixed(2)}</TableCell>
                     <TableCell align="right">{unidad.metrosCuadrados == null ? '-' : unidad.metrosCuadrados.toFixed(2)}</TableCell>
                     <TableCell>{getPropietarioLabel(unidad.propietarioId)}</TableCell>
@@ -2600,8 +3064,8 @@ interface ManagerApiResponse extends ManagedUser {}
             )}
           </Stack>
 
-          <TableContainer component={Paper} sx={{ overflowX: 'hidden', display: { xs: 'none', md: 'block' } }}>
-            <Table size="small" sx={{ tableLayout: 'fixed', width: '100%' }}>
+          <TableContainer component={Paper} sx={{ overflowX: 'auto', display: { xs: 'none', md: 'block' } }}>
+            <Table size="small" sx={{ tableLayout: 'fixed', width: '100%', minWidth: 980 }}>
               <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
                 <TableRow>
                   <TableCell sx={{ width: '8%' }}>Unidad</TableCell>
@@ -2663,9 +3127,17 @@ interface ManagerApiResponse extends ManagedUser {}
   const getValidationMessages = (): string[] => {
     if (currentStep === 1) {
       const issues: string[] = [];
+      const formConsorcio = consorcios.find((c) => c.id === unidadForm.consorcioId);
+      const tipoLocked = formConsorcio?.tipo === 'consorcio';
+      const tipoUnidad = tipoLocked ? 'departamento' : unidadForm.tipo;
+      const requiereCoeficiente = tipoUnidad === 'departamento';
       if (!unidadForm.consorcioId) issues.push('Selecciona un consorcio.');
       if (!unidadForm.numero.trim()) issues.push('Ingresa el numero de unidad.');
-      if (Number.isNaN(Number(unidadForm.coeficiente)) || Number(unidadForm.coeficiente) <= 0) {
+      if (!tipoLocked && !unidadForm.tipo) issues.push('Selecciona un tipo de propiedad.');
+      if (
+        requiereCoeficiente &&
+        (Number.isNaN(Number(unidadForm.coeficiente)) || Number(unidadForm.coeficiente) <= 0)
+      ) {
         issues.push('El coeficiente debe ser mayor a 0.');
       }
       return issues;
@@ -2708,7 +3180,7 @@ interface ManagerApiResponse extends ManagedUser {}
 
   const currentAction = renderStepAction();
   const validationMessages = getValidationMessages();
-  const totalRegistros = consorcios.length + unidades.length + gastos.length + expensas.length + pagos.length + alquileres.length;
+  const totalRegistros = consorcios.length + unidades.length + gastos.length + gastosExtras.length + expensas.length + pagos.length + alquileres.length;
   const moduleStepByView: Partial<Record<ViewMode, number>> = {
     unidades: 1,
     gastos: 2,
@@ -2724,6 +3196,14 @@ interface ManagerApiResponse extends ManagedUser {}
     }
   };
 
+  const activeConsorcio = consorcios.find((c) => c.id === consorcioId) ?? null;
+  const activeConsorcioIsConsorcioType = activeConsorcio?.tipo === 'consorcio';
+  const managerHasConsorcioModule =
+    user?.role !== 'manager' || (activeConsorcio?.modulos?.includes('consorcio') ?? false);
+  const managerHasAlquileresModule =
+    user?.role !== 'manager' || (activeConsorcio?.modulos?.includes('alquileres') ?? false);
+  const managerIsInmobiliaria = user?.role === 'manager' && activeConsorcio?.tipo === 'inmobiliaria';
+
   const navItems: Array<{
     key: ViewMode;
     title: string;
@@ -2734,31 +3214,38 @@ interface ManagerApiResponse extends ManagedUser {}
     
     {
       key: 'unidades',
-      title: 'Unidades',
+      title: user?.role === 'manager' && managerHasConsorcioModule ? 'Unidades y Propietarios' : 'Unidades',
       subtitle: 'Alta, edición y baja',
       meta: `${unidades.length} unidades`,
-      visible: user?.role !== 'owner' && user?.role !== 'tenant',
+      visible: user?.role === 'admin' || user?.role === 'manager',
     },
     {
       key: 'gastos',
       title: 'Gastos del mes',
       subtitle: 'Carga de gastos comunes',
       meta: `${gastos.length} gastos`,
-      visible: user?.role !== 'owner' && user?.role !== 'tenant',
+      visible: user?.role === 'admin' || (user?.role === 'manager' && managerHasConsorcioModule),
+    },
+    {
+      key: 'gastosExtras',
+      title: 'Gastos extras',
+      subtitle: 'Registro por unidad',
+      meta: `${gastosExtras.length} gastos`,
+      visible: user?.role === 'admin' || managerIsInmobiliaria,
     },
     {
       key: 'expensas',
       title: 'Generar expensas',
       subtitle: 'Liquidación por unidad',
       meta: `${expensas.length} expensas`,
-      visible: user?.role !== 'owner' && user?.role !== 'tenant',
+      visible: user?.role === 'admin' || (user?.role === 'manager' && managerHasConsorcioModule),
     },
     {
       key: 'pagos',
       title: 'Registrar pago',
       subtitle: 'Manual u online',
       meta: `${pagos.length} pagos`,
-      visible: user?.role !== 'owner' && user?.role !== 'tenant',
+      visible: user?.role === 'admin' || (user?.role === 'manager' && managerHasConsorcioModule),
     },
     {
       key: 'propietario',
@@ -2772,28 +3259,28 @@ interface ManagerApiResponse extends ManagedUser {}
       title: user?.role === 'tenant' ? 'Mi alquiler' : 'Administración de alquileres',
       subtitle: user?.role === 'tenant' ? 'Deuda y pagos de alquiler' : 'Gestión mensual y cobranza',
       meta: `${alquileres.length} alquileres`,
-      visible: user?.role === 'admin' || user?.role === 'manager' || user?.role === 'tenant',
+      visible: user?.role === 'admin' || user?.role === 'tenant' || (user?.role === 'manager' && managerHasAlquileresModule),
     },
     {
       key: 'reportes',
       title: 'Reportes',
       subtitle: 'Resumen mensual',
       meta: reportePeriodo,
-      visible: user?.role !== 'owner' && user?.role !== 'tenant',
+      visible: user?.role === 'admin' || user?.role === 'manager',
     },
     {
       key: 'configuracion',
-      title: user?.role === 'manager' ? 'Recordatorio del consorcio' : 'Configuración',
-      subtitle: user?.role === 'manager' ? 'Recordatorios del consorcio' : 'Integraciones y notificaciones',
+      title: user?.role === 'manager' ? 'Recordatorio de la organización' : 'Configuración',
+      subtitle: user?.role === 'manager' ? 'Recordatorios de la organización' : 'Integraciones y notificaciones',
       meta: user?.role === 'manager' ? '' : 'WhatsApp y Mercado Pago',
-      visible: user?.role === 'admin' || user?.role === 'manager',
+      visible: user?.role === 'admin' || (user?.role === 'manager' && managerHasConsorcioModule),
     },
     {
       key: 'data',
       title: 'Tablas y registros',
       subtitle: 'Consulta historial completo',
       meta: `${totalRegistros} registros`,
-      visible: user?.role !== 'tenant',
+      visible: user?.role === 'admin' || user?.role === 'manager',
     },
     {
       key: 'admin',
@@ -2804,11 +3291,84 @@ interface ManagerApiResponse extends ManagedUser {}
     },
   ];
 
-  const canManageIntegraciones = user?.role === 'admin';
+  const navOrderByRole: Record<Role, ViewMode[]> = {
+    admin: ['admin', 'unidades', 'gastos', 'gastosExtras', 'expensas', 'pagos', 'alquiler', 'reportes', 'configuracion', 'data'],
+    manager: ['unidades', 'gastos', 'gastosExtras', 'expensas', 'pagos', 'alquiler', 'reportes', 'configuracion', 'data'],
+    owner: ['propietario'],
+    tenant: ['propietario', 'alquiler'],
+  };
 
-  const viewTitleByMode: Record<ViewMode, string> = {
+  const visibleNavItems = navItems
+    .filter((item) => item.visible)
+    .sort((a, b) => {
+      if (!user?.role) {
+        return 0;
+      }
+
+      const order = navOrderByRole[user.role];
+      return order.indexOf(a.key) - order.indexOf(b.key);
+    });
+
+  // Determina qué tabs mostrar en "Tablas y registros"
+  const getDataTabs = (): DataTab[] => {
+    if (user?.role === 'admin') {
+      return ['consorcios', 'unidades', 'gastos', 'gastosExtras', 'expensas', 'pagos'];
+    }
+
+    if (managerIsInmobiliaria) {
+      // Para manager de inmobiliaria: mostrar unidades, gastos, gastosExtras y pagos (sin expensas)
+      return ['consorcios', 'unidades', 'gastos', 'gastosExtras', 'pagos'];
+    }
+
+    // Para manager de consorcio: ocultar gastosExtras
+    return ['consorcios', 'unidades', 'gastos', 'expensas', 'pagos'];
+  };
+  
+  const AVAILABLE_DATA_TABS = getDataTabs();
+  const dataTabLabels: Record<DataTab, string> = {
+    consorcios: 'Organizaciones',
     unidades: 'Unidades',
     gastos: 'Gastos',
+    gastosExtras: 'Gastos extras',
+    expensas: 'Expensas',
+    pagos: 'Pagos',
+  };
+  const dataTabCounts: Record<DataTab, number> = {
+    consorcios: consorcios.length,
+    unidades: unidades.length,
+    gastos: gastos.length,
+    gastosExtras: gastosExtras.length,
+    expensas: expensas.length,
+    pagos: pagos.length,
+  };
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const hasCurrentView = visibleNavItems.some((item) => item.key === viewMode);
+    if (!hasCurrentView && visibleNavItems.length > 0) {
+      selectView(visibleNavItems[0].key);
+    }
+  }, [user, viewMode, visibleNavItems]);
+
+  // Ajusta dataTab si no está disponible para el tipo de organización actual
+  useEffect(() => {
+    const tabs = getDataTabs();
+    if (!tabs.includes(dataTab)) {
+      setDataTab(tabs[0]);
+    }
+  }, [user?.role, managerIsInmobiliaria, dataTab]);
+
+  const canManageIntegraciones = user?.role === 'admin';
+  const reporteHasConsorcioModule = reporteResumen?.modules?.consorcio ?? managerHasConsorcioModule;
+  const reporteHasAlquileresModule = reporteResumen?.modules?.alquileres ?? managerHasAlquileresModule;
+
+  const viewTitleByMode: Record<ViewMode, string> = {
+    unidades: user?.role === 'manager' && managerHasConsorcioModule ? 'Unidades y Propietarios' : 'Unidades',
+    gastos: 'Gastos',
+    gastosExtras: 'Gastos extras',
     expensas: 'Expensas',
     pagos: 'Pagos',
     propietario: user?.role === 'tenant' ? 'Portal inquilino' : 'Portal propietario',
@@ -2826,6 +3386,7 @@ interface ManagerApiResponse extends ManagedUser {}
   const navIconByView: Record<ViewMode, ReactNode> = {
     unidades: <ApartmentIcon fontSize="small" />,
     gastos: <ReceiptLongIcon fontSize="small" />,
+    gastosExtras: <ReceiptLongIcon fontSize="small" />,
     expensas: <DescriptionIcon fontSize="small" />,
     pagos: <PaymentsIcon fontSize="small" />,
     propietario: <PersonIcon fontSize="small" />,
@@ -2942,14 +3503,14 @@ interface ManagerApiResponse extends ManagedUser {}
       <Box
         sx={{
           minHeight: '100vh',
-          py: 5,
+          py: { xs: 2, md: 5 },
           background:
             'radial-gradient(circle at top left, rgba(0,95,115,0.14), transparent 28%), linear-gradient(180deg, #f2f7f4 0%, #eef4f1 100%)',
         }}
       >
         <Container maxWidth="xl">
-          <Box sx={{ mb: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-            <Stack direction="row" spacing={1.5} alignItems="center">
+          <Box sx={{ mb: { xs: 2.5, md: 4 }, display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, gap: 2, flexWrap: 'wrap' }}>
+            <Stack direction="row" spacing={1.2} alignItems="center" sx={{ minWidth: 0 }}>
               {token && (
                 <IconButton
                   sx={{ display: { xs: 'inline-flex', lg: 'none' } }}
@@ -2960,7 +3521,7 @@ interface ManagerApiResponse extends ManagedUser {}
                 </IconButton>
               )}
               <Box>
-                <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: -0.4, fontSize: { xs: '1.9rem', sm: '2.125rem' } }}>Gestión de Consorcios</Typography>
+                <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: -0.4, fontSize: { xs: '1.55rem', sm: '1.9rem', md: '2.125rem' }, lineHeight: 1.15 }}>Gestión de Organizaciones</Typography>
                 {token && (
                   <Typography variant="body2" color="text.secondary">
                     Sección activa: {viewTitle}
@@ -2968,7 +3529,7 @@ interface ManagerApiResponse extends ManagedUser {}
                 )}
               </Box>
             </Stack>
-            {token && <Button variant="outlined" onClick={resetSession}>Cerrar sesión</Button>}
+            {token && <Button variant="outlined" onClick={resetSession} sx={{ width: { xs: '100%', sm: 'auto' } }}>Cerrar sesión</Button>}
           </Box>
 
           {message && <Alert severity="error" sx={{ mb: 2 }}>{message}</Alert>}
@@ -3015,7 +3576,7 @@ interface ManagerApiResponse extends ManagedUser {}
                 onClose={() => setMobileMenuOpen(false)}
                 sx={{ display: { xs: 'block', lg: 'none' } }}
               >
-                <Box sx={{ width: 320, p: 2 }}>
+                <Box sx={{ width: { xs: 'min(92vw, 320px)', sm: 320 }, p: 2 }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
                     <Typography variant="h6">Menú</Typography>
                     <IconButton onClick={() => setMobileMenuOpen(false)}>
@@ -3023,9 +3584,7 @@ interface ManagerApiResponse extends ManagedUser {}
                     </IconButton>
                   </Stack>
                   <Stack spacing={1.2}>
-                    {navItems
-                      .filter((item) => item.visible)
-                      .map((item) => (
+                    {visibleNavItems.map((item) => (
                         <Button
                           key={`mobile-${item.key}`}
                           fullWidth
@@ -3067,9 +3626,7 @@ interface ManagerApiResponse extends ManagedUser {}
                     </Box>
 
                     <Stack spacing={1.2}>
-                      {navItems
-                        .filter((item) => item.visible)
-                        .map((item) => (
+                        {visibleNavItems.map((item) => (
                           <Button
                             key={item.key}
                             fullWidth
@@ -3122,7 +3679,14 @@ interface ManagerApiResponse extends ManagedUser {}
                 </CardContent>
               </Card>
 
-              <Stack spacing={3}>
+              <Stack
+                spacing={3}
+                sx={{
+                  '& .MuiTableContainer-root': {
+                    overflowX: 'auto',
+                  },
+                }}
+              >
               <Paper elevation={0} sx={{ p: { xs: 1.25, md: 1.5 }, borderRadius: 2.5, backgroundColor: '#e9f3ef', border: '1px solid #d5e6df' }}>
                 <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" flexWrap="wrap">
                   <Stack direction="row" spacing={1} alignItems="center">
@@ -3133,53 +3697,103 @@ interface ManagerApiResponse extends ManagedUser {}
                 </Stack>
               </Paper>
 
+              {user?.role === 'manager' && (
+                <Paper elevation={0} sx={{ p: { xs: 1.25, md: 1.5 }, borderRadius: 2.5, backgroundColor: '#f4faf7', border: '1px solid #d5e6df' }}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} alignItems={{ xs: 'flex-start', md: 'center' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                      Organización asignada: {activeConsorcio?.nombre ?? 'Sin organización asignada'}
+                    </Typography>
+                    {activeConsorcio?.tipo && (
+                      <Chip size="small" variant="outlined" label={`Tipo: ${consorcioTipoLabels[activeConsorcio.tipo]}`} />
+                    )}
+                    <Typography variant="caption" color="text.secondary">
+                      Módulos: {activeConsorcio?.modulos?.length ? activeConsorcio.modulos.map((m) => moduloLabels[m]).join(', ') : 'No configurados'}
+                    </Typography>
+                  </Stack>
+                </Paper>
+              )}
+
               {user?.role === 'admin' && viewMode === 'admin' && (
                 <Stack spacing={2}>
                   <Card sx={{ borderRadius: 4, border: '1px solid #d7e5df', boxShadow: '0 12px 28px rgba(0,0,0,0.05)' }}>
                     <CardContent>
                       <Stack spacing={2}>
-                        <Box>
-                          <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.1 }}>
-                            Administración
-                          </Typography>
-                          <Typography variant="h6">Crear edificio / consorcio</Typography>
-                          <Typography color="text.secondary">
-                            Primero crea el consorcio para luego asociar managers y unidades sobre ese edificio.
-                          </Typography>
-                        </Box>
-
-                        <Box
-                          sx={{
-                            display: 'grid',
-                            gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
-                            gap: 2,
-                          }}
-                        >
-                          <TextField
-                            label="Nombre del consorcio"
-                            value={consorcioForm.nombre}
-                            onChange={(event) => setConsorcioForm((current) => ({ ...current, nombre: event.target.value }))}
-                          />
-                          <TextField
-                            label="Dirección"
-                            value={consorcioForm.direccion}
-                            onChange={(event) => setConsorcioForm((current) => ({ ...current, direccion: event.target.value }))}
-                          />
-                        </Box>
-
-                        <Box>
-                          <Button
-                            variant="contained"
-                            onClick={handleCreateConsorcio}
-                            disabled={
-                              isSubmitting ||
-                              !consorcioForm.nombre.trim() ||
-                              !consorcioForm.direccion.trim()
-                            }
-                          >
-                            Crear consorcio
+                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.2}>
+                          <Box>
+                            <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.1 }}>
+                              Administración
+                            </Typography>
+                            <Typography variant="h6">Organizaciones</Typography>
+                            <Typography color="text.secondary">
+                              Clientes registrados en la plataforma.
+                            </Typography>
+                          </Box>
+                          <Button variant="contained" onClick={handleOpenCreateConsorcio} disabled={isSubmitting}>
+                            Nuevo
                           </Button>
-                        </Box>
+                        </Stack>
+
+                        {consorcios.length === 0 ? (
+                          <Paper elevation={0} sx={{ p: 2, borderRadius: 2, backgroundColor: '#f6f7f8' }}>
+                            <Typography color="text.secondary">Aún no hay organizaciones creadas.</Typography>
+                          </Paper>
+                        ) : (
+                          <TableContainer component={Paper}>
+                            <Table size="small">
+                              <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                <TableRow>
+                                  <TableCell>Nombre</TableCell>
+                                  <TableCell>Tipo</TableCell>
+                                  <TableCell>Dirección</TableCell>
+                                  <TableCell>Módulos</TableCell>
+                                  <TableCell>Estado</TableCell>
+                                  <TableCell>Acciones</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {consorcios.map((consorcio) => (
+                                  <TableRow key={consorcio.id} sx={{ opacity: consorcio.activo === false ? 0.55 : 1 }}>
+                                    <TableCell>{consorcio.nombre}</TableCell>
+                                    <TableCell>{consorcioTipoLabels[consorcio.tipo]}</TableCell>
+                                    <TableCell>{consorcio.direccion}</TableCell>
+                                    <TableCell>
+                                      {consorcio.modulos?.map((m) => moduloLabels[m]).join(', ') ?? '—'}
+                                    </TableCell>
+                                    <TableCell>
+                                      <Chip
+                                        size="small"
+                                        label={consorcio.activo === false ? 'Inactiva' : 'Activa'}
+                                        color={consorcio.activo === false ? 'default' : 'success'}
+                                        variant="outlined"
+                                      />
+                                    </TableCell>
+                                    <TableCell>
+                                      <Stack direction="row" spacing={1}>
+                                        <Button
+                                          size="small"
+                                          variant="outlined"
+                                          onClick={() => handleOpenEditConsorcio(consorcio)}
+                                          disabled={isSubmitting}
+                                        >
+                                          Editar
+                                        </Button>
+                                        <Button
+                                          size="small"
+                                          color={consorcio.activo === false ? 'success' : 'warning'}
+                                          variant="outlined"
+                                          onClick={() => handleToggleConsorcioActivo(consorcio)}
+                                          disabled={isSubmitting}
+                                        >
+                                          {consorcio.activo === false ? 'Activar' : 'Desactivar'}
+                                        </Button>
+                                      </Stack>
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        )}
                       </Stack>
                     </CardContent>
                   </Card>
@@ -3271,7 +3885,7 @@ interface ManagerApiResponse extends ManagedUser {}
                             Estos propietarios estarán disponibles para asociar unidades.
                           </Typography>
                           </Box>
-                          <Button variant="contained" onClick={handleOpenCreateOwner} disabled={isSubmitting}>
+                          <Button variant="contained" size="small" onClick={handleOpenCreateOwner} disabled={isSubmitting} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                             Nuevo
                           </Button>
                         </Stack>
@@ -3344,7 +3958,13 @@ interface ManagerApiResponse extends ManagedUser {}
               )}
 
               <Alert severity="info" sx={{ borderRadius: 3 }}>
-                <strong>Rol actual:</strong> {user ? roleLabels[user.role] : 'Sin rol'}. Ahora la generación de expensas liquida por <strong>unidad</strong> y permite criterio por <strong>coeficiente</strong> o <strong>m2</strong>.
+                <strong>Rol actual:</strong> {user ? roleLabels[user.role] : 'Sin rol'}. {managerHasConsorcioModule
+                  ? (
+                    <>Ahora la generación de expensas liquida por <strong>unidad</strong> y permite criterio por <strong>coeficiente</strong> o <strong>m2</strong>.</>
+                  )
+                  : (
+                    <>Gestionas alquileres de la organización asignada sin acceso a módulos de expensas.</>
+                  )}
               </Alert>
 
               <Fade
@@ -3384,7 +4004,7 @@ interface ManagerApiResponse extends ManagedUser {}
                               <Typography color="text.secondary">{currentAction.description}</Typography>
                             </Box>
                             {moduleButtonLabelByView[viewMode] && (
-                              <Button variant="contained" onClick={openModuleForm}>
+                              <Button variant="contained" size="small" onClick={openModuleForm} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                                 {moduleButtonLabelByView[viewMode]}
                               </Button>
                             )}
@@ -3431,6 +4051,95 @@ interface ManagerApiResponse extends ManagedUser {}
                     </Stack>
                   </CardContent>
                 </Card>
+
+                {viewMode === 'unidades' && user?.role === 'manager' && managerHasConsorcioModule && (
+                  <Card sx={{ mt: 2, borderRadius: 4, border: '1px solid #d7e5df', boxShadow: '0 14px 34px rgba(0,0,0,0.06)' }}>
+                    <CardContent>
+                      <Stack spacing={2}>
+                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.2}>
+                          <Box>
+                            <Typography variant="h6">Propietarios</Typography>
+                            <Typography color="text.secondary">
+                              Alta y edición de propietarios de este consorcio.
+                            </Typography>
+                          </Box>
+                          <Button variant="contained" size="small" onClick={handleOpenCreateOwner} disabled={isSubmitting} sx={{ width: { xs: '100%', sm: 'auto' } }}>
+                            Nuevo
+                          </Button>
+                        </Stack>
+
+                        {owners.length === 0 ? (
+                          <Paper elevation={0} sx={{ p: 2, borderRadius: 2, backgroundColor: '#f6f7f8' }}>
+                            <Typography color="text.secondary">Aún no hay propietarios cargados.</Typography>
+                          </Paper>
+                        ) : (
+                          <>
+                            <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
+                              {owners.map((owner) => {
+                                const assignedUnidad = unidades.find((u) => u.propietarioId === owner.id);
+                                return (
+                                  <Paper key={`owner-card-${owner.id}`} elevation={0} sx={{ p: 1.5, borderRadius: 2, border: '1px solid #dce9e4' }}>
+                                    <Stack spacing={0.6}>
+                                      <Typography variant="subtitle2">{owner.name}</Typography>
+                                      <Typography variant="caption" color="text.secondary">{owner.email}</Typography>
+                                      {owner.phoneNumber && (
+                                        <Typography variant="caption" color="text.secondary">WhatsApp: {owner.phoneNumber}</Typography>
+                                      )}
+                                      <Typography variant="caption" color="text.secondary">
+                                        Unidad: {assignedUnidad ? assignedUnidad.numero : 'Sin asignar'}
+                                      </Typography>
+                                      <Stack direction="row" spacing={1}>
+                                        <Button size="small" variant="outlined" onClick={() => handleStartEditOwner(owner)} disabled={isSubmitting}>Editar</Button>
+                                        <Button size="small" color="error" onClick={() => handleDeleteOwner(owner)} disabled={isSubmitting}>Eliminar</Button>
+                                      </Stack>
+                                    </Stack>
+                                  </Paper>
+                                );
+                              })}
+                            </Stack>
+
+                            <TableContainer component={Paper} sx={{ overflowX: 'auto', display: { xs: 'none', md: 'block' } }}>
+                              <Table size="small" sx={{ minWidth: 640 }}>
+                                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                  <TableRow>
+                                    <TableCell>Nombre</TableCell>
+                                    <TableCell>Email</TableCell>
+                                    <TableCell>WhatsApp</TableCell>
+                                    <TableCell>Unidad asignada</TableCell>
+                                    <TableCell>Acciones</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {owners.map((owner) => {
+                                    const assignedUnidad = unidades.find((u) => u.propietarioId === owner.id);
+                                    return (
+                                      <TableRow key={owner.id}>
+                                        <TableCell>{owner.name}</TableCell>
+                                        <TableCell>{owner.email}</TableCell>
+                                        <TableCell>{owner.phoneNumber || '—'}</TableCell>
+                                        <TableCell>{assignedUnidad ? assignedUnidad.numero : 'Sin asignar'}</TableCell>
+                                        <TableCell>
+                                          <Stack direction="row" spacing={1}>
+                                            <Button size="small" variant="outlined" onClick={() => handleStartEditOwner(owner)} disabled={isSubmitting}>
+                                              Editar
+                                            </Button>
+                                            <Button size="small" color="error" onClick={() => handleDeleteOwner(owner)} disabled={isSubmitting}>
+                                              Eliminar
+                                            </Button>
+                                          </Stack>
+                                        </TableCell>
+                                      </TableRow>
+                                    );
+                                  })}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          </>
+                        )}
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                )}
 
                 </Box>
               </Fade>
@@ -3508,6 +4217,39 @@ interface ManagerApiResponse extends ManagedUser {}
                       }
                       fullWidth
                     />
+                    <TextField
+                      label="Nombre"
+                      value={unidadEditForm.nombre}
+                      onChange={(event) =>
+                        setUnidadEditForm((current) => ({ ...current, nombre: event.target.value }))
+                      }
+                      fullWidth
+                    />
+                    {activeConsorcioIsConsorcioType ? (
+                      <TextField
+                        label="Tipo de propiedad"
+                        value={tipoPropiedadLabels[unidadEditForm.tipo]}
+                        fullWidth
+                        InputProps={{ readOnly: true }}
+                        helperText="Fijo para organizaciones de tipo consorcio"
+                      />
+                    ) : (
+                      <TextField
+                        select
+                        label="Tipo de propiedad"
+                        value={unidadEditForm.tipo}
+                        onChange={(event) =>
+                          setUnidadEditForm((current) => ({ ...current, tipo: event.target.value as TipoPropiedad }))
+                        }
+                        fullWidth
+                      >
+                        {(Object.keys(tipoPropiedadLabels) as TipoPropiedad[]).map((tipo) => (
+                          <MenuItem key={tipo} value={tipo}>
+                            {tipoPropiedadLabels[tipo]}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                    )}
                     <TextField
                       label="Coeficiente"
                       type="number"
@@ -3802,17 +4544,53 @@ interface ManagerApiResponse extends ManagedUser {}
                     />
                     <TextField
                       select
+                      label="Organización"
+                      value={ownerEditForm.consorcioId}
+                      onChange={(event) =>
+                        setOwnerEditForm((current) => ({
+                          ...current,
+                          consorcioId: event.target.value,
+                          unidadId: '',
+                        }))
+                      }
+                      fullWidth
+                      disabled={user?.role === 'manager'}
+                      helperText={
+                        user?.role === 'manager'
+                          ? 'Como manager, solo puedes operar sobre tu organización asignada'
+                          : 'Requerido cuando el propietario no tiene unidad asignada'
+                      }
+                    >
+                      {user?.role !== 'manager' && <MenuItem value="">Seleccionar organización</MenuItem>}
+                      {consorcios
+                        .filter((c) => c.tipo === 'consorcio' || c.tipo === 'propietario_individual')
+                        .map((consorcio) => (
+                          <MenuItem key={consorcio.id} value={consorcio.id}>
+                            {consorcio.nombre}
+                          </MenuItem>
+                        ))}
+                    </TextField>
+                    <TextField
+                      select
                       label="Unidad asignada"
                       value={ownerEditForm.unidadId}
-                      onChange={(event) => setOwnerEditForm((current) => ({ ...current, unidadId: event.target.value }))}
+                      onChange={(event) => {
+                        const nextUnidadId = event.target.value;
+                        const selectedUnidad = unidades.find((unidad) => unidad.id === nextUnidadId);
+                        setOwnerEditForm((current) => ({
+                          ...current,
+                          unidadId: nextUnidadId,
+                          consorcioId: selectedUnidad?.consorcioId ?? current.consorcioId,
+                        }));
+                      }}
                       fullWidth
                     >
                       <MenuItem value="">Sin asignar</MenuItem>
                       {unidades
                         .filter(
                           (unidad) =>
-                            !unidad.propietarioId ||
-                            (editingOwnerId ? unidad.propietarioId === editingOwnerId : false),
+                            (!ownerEditForm.consorcioId || unidad.consorcioId === ownerEditForm.consorcioId) &&
+                            (!unidad.propietarioId || (editingOwnerId ? unidad.propietarioId === editingOwnerId : false)),
                         )
                         .map((unidad) => (
                           <MenuItem key={unidad.id} value={unidad.id}>
@@ -3837,11 +4615,91 @@ interface ManagerApiResponse extends ManagedUser {}
                     disabled={
                       !ownerEditForm.name.trim() ||
                       !ownerEditForm.email.trim() ||
+                      !ownerEditForm.consorcioId ||
                       (!editingOwnerId && ownerEditForm.password.length < 6) ||
                       (Boolean(editingOwnerId) && ownerEditForm.password.length > 0 && ownerEditForm.password.length < 6)
                     }
                   >
                     Guardar cambios
+                  </Button>
+                </DialogActions>
+              </Dialog>
+
+              <Dialog
+                open={consorcioModalOpen}
+                onClose={() => setConsorcioModalOpen(false)}
+                fullWidth
+                maxWidth="sm"
+                PaperProps={{
+                  sx: {
+                    borderRadius: 3,
+                    border: '1px solid #7fb3a4',
+                    boxShadow: '0 18px 44px rgba(0, 95, 115, 0.22)',
+                    overflow: 'hidden',
+                  },
+                }}
+              >
+                <DialogTitle sx={{ backgroundColor: '#e7f3ef', borderBottom: '1px solid #c9dfd7' }}>
+                  {editingConsorcioId ? 'Editar organización' : 'Nueva organización'}
+                </DialogTitle>
+                <DialogContent>
+                  <Stack spacing={2} sx={{ pt: 1 }}>
+                    <TextField
+                      select
+                      label="Tipo de cliente"
+                      value={consorcioForm.tipo}
+                      onChange={(event) => applyConsorcioTipoPreset(event.target.value as ConsorcioTipo)}
+                      fullWidth
+                    >
+                      {(Object.keys(consorcioTipoLabels) as ConsorcioTipo[]).map((tipo) => (
+                        <MenuItem key={tipo} value={tipo}>{consorcioTipoLabels[tipo]}</MenuItem>
+                      ))}
+                    </TextField>
+                    <TextField
+                      label="Nombre"
+                      value={consorcioForm.nombre}
+                      onChange={(event) => setConsorcioForm((current) => ({ ...current, nombre: event.target.value }))}
+                      fullWidth
+                      autoFocus
+                    />
+                    <TextField
+                      label="Dirección"
+                      value={consorcioForm.direccion}
+                      onChange={(event) => setConsorcioForm((current) => ({ ...current, direccion: event.target.value }))}
+                      fullWidth
+                    />
+                    <Box>
+                      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Módulos habilitados</Typography>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        {(Object.keys(moduloLabels) as ModuloHabilitado[]).map((modulo) => {
+                          const active = consorcioForm.modulos.includes(modulo);
+                          return (
+                            <Chip
+                              key={`dlg-modulo-${modulo}`}
+                              label={moduloLabels[modulo]}
+                              color={active ? 'primary' : 'default'}
+                              variant={active ? 'filled' : 'outlined'}
+                              onClick={() => toggleConsorcioModulo(modulo)}
+                            />
+                          );
+                        })}
+                      </Stack>
+                    </Box>
+                  </Stack>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, borderTop: '1px solid #c9dfd7', backgroundColor: '#f5faf8' }}>
+                  <Button onClick={() => setConsorcioModalOpen(false)}>Cancelar</Button>
+                  <Button
+                    variant="contained"
+                    onClick={handleCreateConsorcio}
+                    disabled={
+                      isSubmitting ||
+                      !consorcioForm.nombre.trim() ||
+                      !consorcioForm.direccion.trim() ||
+                      consorcioForm.modulos.length === 0
+                    }
+                  >
+                    {editingConsorcioId ? 'Guardar cambios' : 'Crear'}
                   </Button>
                 </DialogActions>
               </Dialog>
@@ -3969,9 +4827,13 @@ interface ManagerApiResponse extends ManagedUser {}
                         <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
                           {user?.role === 'tenant' ? 'Portal Inquilino' : 'Portal Propietario'}
                         </Typography>
-                        <Typography variant="h5">Mi expensa del mes y pagos</Typography>
+                        <Typography variant="h5">
+                          {user?.role === 'tenant' ? 'Mi alquiler del mes y pagos' : 'Mi expensa del mes y pagos'}
+                        </Typography>
                         <Typography color="text.secondary">
-                          Aquí el propietario visualiza sus expensas por período, ve el detalle para PDF y puede pagar online o reportar pago manual.
+                          {user?.role === 'tenant'
+                            ? 'Aquí el inquilino visualiza sus alquileres por período y puede consultar sus pagos de alquiler.'
+                            : 'Aquí el propietario visualiza sus expensas por período, ve el detalle para PDF y puede pagar online o reportar pago manual.'}
                         </Typography>
                       </Box>
 
@@ -3999,7 +4861,11 @@ interface ManagerApiResponse extends ManagedUser {}
                       )}
 
                       {expensas.length === 0 ? (
-                        <Alert severity="info">No tienes expensas disponibles todavía.</Alert>
+                        <Alert severity="info">
+                          {user?.role === 'tenant'
+                            ? 'No tienes alquileres disponibles todavía.'
+                            : 'No tienes expensas disponibles todavía.'}
+                        </Alert>
                       ) : (
                         <>
                           <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
@@ -4099,9 +4965,15 @@ interface ManagerApiResponse extends ManagedUser {}
                       )}
 
                       <Box>
-                        <Typography variant="h6" sx={{ mb: 1 }}>Mis últimos pagos</Typography>
+                        <Typography variant="h6" sx={{ mb: 1 }}>
+                          {user?.role === 'tenant' ? 'Mis últimos pagos de alquiler' : 'Mis últimos pagos'}
+                        </Typography>
                         {latestOwnerPayments.length === 0 ? (
-                          <Alert severity="info">Aún no registraste pagos.</Alert>
+                          <Alert severity="info">
+                            {user?.role === 'tenant'
+                              ? 'Aún no registraste pagos de alquiler.'
+                              : 'Aún no registraste pagos.'}
+                          </Alert>
                         ) : (
                           <>
                             <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
@@ -4174,7 +5046,7 @@ interface ManagerApiResponse extends ManagedUser {}
                     <Card sx={{ borderRadius: 4 }}>
                       <CardContent>
                         <Stack spacing={2}>
-                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.2}>
                             <Box>
                               <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
                                 Inquilinos
@@ -4184,7 +5056,7 @@ interface ManagerApiResponse extends ManagedUser {}
                                 Registra los inquilinos antes de crear contratos de alquiler.
                               </Typography>
                             </Box>
-                            <Button variant="contained" size="small" onClick={() => handleOpenInquilinoDialog()}>
+                            <Button variant="contained" size="small" onClick={() => handleOpenInquilinoDialog()} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                               + Nuevo inquilino
                             </Button>
                           </Stack>
@@ -4194,48 +5066,75 @@ interface ManagerApiResponse extends ManagedUser {}
                               No hay inquilinos registrados. Crea uno para poder asignarlo a un contrato.
                             </Alert>
                           ) : (
-                            <TableContainer component={Paper}>
-                              <Table size="small">
-                                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
-                                  <TableRow>
-                                    <TableCell>Nombre</TableCell>
-                                    <TableCell>Email</TableCell>
-                                    <TableCell>Teléfono</TableCell>
-                                    {user?.role === 'admin' && <TableCell>Consorcio</TableCell>}
-                                    <TableCell>Acciones</TableCell>
-                                  </TableRow>
-                                </TableHead>
-                                <TableBody>
-                                  {inquilinos.map((inq) => (
-                                    <TableRow key={inq.id}>
-                                      <TableCell>{inq.name}</TableCell>
-                                      <TableCell>{inq.email}</TableCell>
-                                      <TableCell>{inq.phoneNumber ?? '-'}</TableCell>
+                            <>
+                              <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
+                                {inquilinos.map((inq) => (
+                                  <Paper key={`inquilino-card-${inq.id}`} elevation={0} sx={{ p: 1.5, borderRadius: 2, border: '1px solid #dce9e4' }}>
+                                    <Stack spacing={0.75}>
+                                      <Typography variant="subtitle2">{inq.name}</Typography>
+                                      <Typography variant="caption" color="text.secondary">Email: {inq.email}</Typography>
+                                      <Typography variant="caption" color="text.secondary">Teléfono: {inq.phoneNumber ?? '-'}</Typography>
                                       {user?.role === 'admin' && (
-                                        <TableCell>
-                                          {consorcios.find((c) => c.id === inq.consorcioId)?.nombre ?? inq.consorcioId?.slice(0, 8) ?? '-'}
-                                        </TableCell>
+                                        <Typography variant="caption" color="text.secondary">
+                                          Consorcio: {consorcios.find((c) => c.id === inq.consorcioId)?.nombre ?? inq.consorcioId?.slice(0, 8) ?? '-'}
+                                        </Typography>
                                       )}
-                                      <TableCell>
-                                        <Stack direction="row" spacing={1}>
-                                          <Button size="small" variant="outlined" onClick={() => handleOpenInquilinoDialog(inq)}>
-                                            Editar
-                                          </Button>
-                                          <Button
-                                            size="small"
-                                            variant="outlined"
-                                            color="error"
-                                            onClick={() => handleRemoveInquilino(inq.id)}
-                                          >
-                                            Eliminar
-                                          </Button>
-                                        </Stack>
-                                      </TableCell>
+                                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                                        <Button size="small" variant="outlined" onClick={() => handleOpenInquilinoDialog(inq)}>
+                                          Editar
+                                        </Button>
+                                        <Button size="small" variant="outlined" color="error" onClick={() => handleRemoveInquilino(inq.id)}>
+                                          Eliminar
+                                        </Button>
+                                      </Stack>
+                                    </Stack>
+                                  </Paper>
+                                ))}
+                              </Stack>
+
+                              <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' } }}>
+                                <Table size="small">
+                                  <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                    <TableRow>
+                                      <TableCell>Nombre</TableCell>
+                                      <TableCell>Email</TableCell>
+                                      <TableCell>Teléfono</TableCell>
+                                      {user?.role === 'admin' && <TableCell>Consorcio</TableCell>}
+                                      <TableCell>Acciones</TableCell>
                                     </TableRow>
-                                  ))}
-                                </TableBody>
-                              </Table>
-                            </TableContainer>
+                                  </TableHead>
+                                  <TableBody>
+                                    {inquilinos.map((inq) => (
+                                      <TableRow key={inq.id}>
+                                        <TableCell>{inq.name}</TableCell>
+                                        <TableCell>{inq.email}</TableCell>
+                                        <TableCell>{inq.phoneNumber ?? '-'}</TableCell>
+                                        {user?.role === 'admin' && (
+                                          <TableCell>
+                                            {consorcios.find((c) => c.id === inq.consorcioId)?.nombre ?? inq.consorcioId?.slice(0, 8) ?? '-'}
+                                          </TableCell>
+                                        )}
+                                        <TableCell>
+                                          <Stack direction="row" spacing={1}>
+                                            <Button size="small" variant="outlined" onClick={() => handleOpenInquilinoDialog(inq)}>
+                                              Editar
+                                            </Button>
+                                            <Button
+                                              size="small"
+                                              variant="outlined"
+                                              color="error"
+                                              onClick={() => handleRemoveInquilino(inq.id)}
+                                            >
+                                              Eliminar
+                                            </Button>
+                                          </Stack>
+                                        </TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </TableBody>
+                                </Table>
+                              </TableContainer>
+                            </>
                           )}
                         </Stack>
                       </CardContent>
@@ -4247,7 +5146,7 @@ interface ManagerApiResponse extends ManagedUser {}
                     <Card sx={{ borderRadius: 4 }}>
                       <CardContent>
                         <Stack spacing={2}>
-                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.2}>
                             <Box>
                               <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
                                 Contratos de alquiler
@@ -4257,7 +5156,7 @@ interface ManagerApiResponse extends ManagedUser {}
                                 Gestiona los contratos vigentes: inquilino, unidad, monto mensual y día de vencimiento.
                               </Typography>
                             </Box>
-                            <Button variant="contained" size="small" onClick={() => handleOpenContratoDialog()}>
+                            <Button variant="contained" size="small" onClick={() => handleOpenContratoDialog()} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                               + Nuevo contrato
                             </Button>
                           </Stack>
@@ -4265,54 +5164,101 @@ interface ManagerApiResponse extends ManagedUser {}
                           {contratos.length === 0 ? (
                             <Alert severity="info">No hay contratos activos. Crea el primero para comenzar a generar alquileres.</Alert>
                           ) : (
-                            <TableContainer component={Paper}>
-                              <Table size="small">
-                                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
-                                  <TableRow>
-                                    <TableCell>Unidad</TableCell>
-                                    <TableCell>Inquilino</TableCell>
-                                    <TableCell align="right">Monto mensual</TableCell>
-                                    <TableCell>Día venc.</TableCell>
-                                    <TableCell>Estado</TableCell>
-                                    <TableCell>Acciones</TableCell>
-                                  </TableRow>
-                                </TableHead>
-                                <TableBody>
-                                  {contratos.map((contrato) => (
-                                    <TableRow key={contrato.id}>
-                                      <TableCell>{contrato.unidad?.numero ?? contrato.unidadId.slice(0, 8)}</TableCell>
-                                      <TableCell>{contrato.inquilino?.name ?? contrato.inquilinoId.slice(0, 8)}</TableCell>
-                                      <TableCell align="right">{formatMoney(contrato.montoMensual)}</TableCell>
-                                      <TableCell>{contrato.diaVencimiento}</TableCell>
-                                      <TableCell>
-                                        <Chip
-                                          label={contrato.activo ? 'Activo' : 'Inactivo'}
-                                          color={contrato.activo ? 'success' : 'default'}
-                                          size="small"
-                                        />
-                                      </TableCell>
-                                      <TableCell>
-                                        <Stack direction="row" spacing={1}>
-                                          <Button size="small" variant="outlined" onClick={() => handleOpenContratoDialog(contrato)}>
-                                            Editar
+                            <>
+                              <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
+                                {contratos.map((contrato) => (
+                                  <Paper key={`contrato-card-${contrato.id}`} elevation={0} sx={{ p: 1.5, borderRadius: 2, border: '1px solid #dce9e4' }}>
+                                    <Stack spacing={0.75}>
+                                      <Typography variant="subtitle2">Unidad {contrato.unidad?.numero ?? contrato.unidadId.slice(0, 8)}</Typography>
+                                      <Typography variant="caption" color="text.secondary">Inquilino: {contrato.inquilino?.name ?? contrato.inquilinoId.slice(0, 8)}</Typography>
+                                      <Typography variant="caption" color="text.secondary">Monto: {formatMoney(contrato.montoMensual)}</Typography>
+                                      <Typography variant="caption" color="text.secondary">Vencimiento: día {contrato.diaVencimiento}</Typography>
+                                      <Box>
+                                        <Chip label={contrato.activo ? 'Activo' : 'Inactivo'} color={contrato.activo ? 'success' : 'default'} size="small" />
+                                      </Box>
+                                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                                        {contrato.contratoDigitalUrl ? (
+                                          <Button size="small" variant="text" onClick={() => handleOpenComprobante(contrato.contratoDigitalUrl ?? null)}>
+                                            Ver archivo
                                           </Button>
-                                          {contrato.activo && (
+                                        ) : null}
+                                        <Button size="small" variant="outlined" onClick={() => handleOpenContratoDialog(contrato)}>
+                                          Editar
+                                        </Button>
+                                        {contrato.activo && (
+                                          <Button size="small" variant="outlined" color="error" onClick={() => handleDeactivateContrato(contrato.id)}>
+                                            Desactivar
+                                          </Button>
+                                        )}
+                                      </Stack>
+                                    </Stack>
+                                  </Paper>
+                                ))}
+                              </Stack>
+
+                              <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' } }}>
+                                <Table size="small">
+                                  <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                    <TableRow>
+                                      <TableCell>Unidad</TableCell>
+                                      <TableCell>Inquilino</TableCell>
+                                      <TableCell align="right">Monto mensual</TableCell>
+                                      <TableCell>Día venc.</TableCell>
+                                      <TableCell>Contrato digital</TableCell>
+                                      <TableCell>Estado</TableCell>
+                                      <TableCell>Acciones</TableCell>
+                                    </TableRow>
+                                  </TableHead>
+                                  <TableBody>
+                                    {contratos.map((contrato) => (
+                                      <TableRow key={contrato.id}>
+                                        <TableCell>{contrato.unidad?.numero ?? contrato.unidadId.slice(0, 8)}</TableCell>
+                                        <TableCell>{contrato.inquilino?.name ?? contrato.inquilinoId.slice(0, 8)}</TableCell>
+                                        <TableCell align="right">{formatMoney(contrato.montoMensual)}</TableCell>
+                                        <TableCell>{contrato.diaVencimiento}</TableCell>
+                                        <TableCell>
+                                          {contrato.contratoDigitalUrl ? (
                                             <Button
                                               size="small"
-                                              variant="outlined"
-                                              color="error"
-                                              onClick={() => handleDeactivateContrato(contrato.id)}
+                                              variant="text"
+                                              onClick={() => handleOpenComprobante(contrato.contratoDigitalUrl ?? null)}
                                             >
-                                              Desactivar
+                                              Ver archivo
                                             </Button>
+                                          ) : (
+                                            'Sin archivo'
                                           )}
-                                        </Stack>
-                                      </TableCell>
-                                    </TableRow>
-                                  ))}
-                                </TableBody>
-                              </Table>
-                            </TableContainer>
+                                        </TableCell>
+                                        <TableCell>
+                                          <Chip
+                                            label={contrato.activo ? 'Activo' : 'Inactivo'}
+                                            color={contrato.activo ? 'success' : 'default'}
+                                            size="small"
+                                          />
+                                        </TableCell>
+                                        <TableCell>
+                                          <Stack direction="row" spacing={1}>
+                                            <Button size="small" variant="outlined" onClick={() => handleOpenContratoDialog(contrato)}>
+                                              Editar
+                                            </Button>
+                                            {contrato.activo && (
+                                              <Button
+                                                size="small"
+                                                variant="outlined"
+                                                color="error"
+                                                onClick={() => handleDeactivateContrato(contrato.id)}
+                                              >
+                                                Desactivar
+                                              </Button>
+                                            )}
+                                          </Stack>
+                                        </TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </TableBody>
+                                </Table>
+                              </TableContainer>
+                            </>
                           )}
                         </Stack>
                       </CardContent>
@@ -4367,6 +5313,7 @@ interface ManagerApiResponse extends ManagedUser {}
                                 variant="contained"
                                 onClick={handleGenerarAlquileres}
                                 disabled={alquilerGeneracionLoading || !reportePeriodo || (user?.role === 'admin' && !reporteConsorcioId)}
+                                sx={{ width: { xs: '100%', md: 'auto' } }}
                               >
                                 {alquilerGeneracionLoading ? 'Generando...' : 'Generar alquileres'}
                               </Button>
@@ -4374,6 +5321,7 @@ interface ManagerApiResponse extends ManagedUser {}
                                 variant="outlined"
                                 onClick={handleRecordarAlquileres}
                                 disabled={alquilerReminderLoading || !reportePeriodo || (user?.role === 'admin' && !reporteConsorcioId)}
+                                sx={{ width: { xs: '100%', md: 'auto' } }}
                               >
                                 {alquilerReminderLoading ? 'Enviando...' : 'Recordar pendientes'}
                               </Button>
@@ -4396,53 +5344,88 @@ interface ManagerApiResponse extends ManagedUser {}
                         {alquileres.length === 0 ? (
                           <Alert severity="info">No hay alquileres para el filtro actual. Generá los del período con el botón de arriba.</Alert>
                         ) : (
-                          <TableContainer component={Paper}>
-                            <Table size="small">
-                              <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
-                                <TableRow>
-                                  <TableCell>Período</TableCell>
-                                  <TableCell>Unidad</TableCell>
-                                  <TableCell align="right">Monto</TableCell>
-                                  <TableCell>Estado</TableCell>
-                                  <TableCell>Método</TableCell>
-                                  <TableCell>Vencimiento</TableCell>
-                                  <TableCell>Acciones</TableCell>
-                                </TableRow>
-                              </TableHead>
-                              <TableBody>
-                                {alquileres.map((alquiler) => (
-                                  <TableRow key={alquiler.id}>
-                                    <TableCell>{alquiler.periodo}</TableCell>
-                                    <TableCell>{alquiler.unidad?.numero ?? alquiler.unidadId.slice(0, 8)}</TableCell>
-                                    <TableCell align="right">{formatMoney(alquiler.monto)}</TableCell>
-                                    <TableCell>
+                          <>
+                            <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
+                              {alquileres.map((alquiler) => (
+                                <Paper key={`alquiler-card-${alquiler.id}`} elevation={0} sx={{ p: 1.5, borderRadius: 2, border: '1px solid #dce9e4' }}>
+                                  <Stack spacing={0.75}>
+                                    <Typography variant="subtitle2">Período {alquiler.periodo}</Typography>
+                                    <Typography variant="caption" color="text.secondary">Unidad: {alquiler.unidad?.numero ?? alquiler.unidadId.slice(0, 8)}</Typography>
+                                    <Typography variant="caption" color="text.secondary">Monto: {formatMoney(alquiler.monto)}</Typography>
+                                    <Typography variant="caption" color="text.secondary">Método: {alquiler.metodo ?? '-'}</Typography>
+                                    <Typography variant="caption" color="text.secondary">Vence: {new Date(alquiler.fechaVencimiento).toLocaleDateString('es-AR')}</Typography>
+                                    <Box>
                                       <Chip
                                         label={alquiler.estado}
                                         size="small"
                                         color={alquiler.estado === 'aprobado' ? 'success' : alquiler.estado === 'vencido' ? 'error' : 'warning'}
                                       />
-                                    </TableCell>
-                                    <TableCell>{alquiler.metodo ?? '-'}</TableCell>
-                                    <TableCell>{new Date(alquiler.fechaVencimiento).toLocaleDateString('es-AR')}</TableCell>
-                                    <TableCell>
-                                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-                                        {alquiler.estado !== 'aprobado' && (
-                                          <Button size="small" variant="contained" onClick={() => handlePagarAlquilerOnline(alquiler)}>
-                                            Pagar online
-                                          </Button>
-                                        )}
-                                        {(user?.role === 'admin' || user?.role === 'manager') && alquiler.estado !== 'aprobado' && (
-                                          <Button size="small" variant="outlined" onClick={() => handleRegistrarPagoAlquilerManual(alquiler.id)}>
-                                            Manual
-                                          </Button>
-                                        )}
-                                      </Stack>
-                                    </TableCell>
+                                    </Box>
+                                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                                      {alquiler.estado !== 'aprobado' && (
+                                        <Button size="small" variant="contained" onClick={() => handlePagarAlquilerOnline(alquiler)}>
+                                          Pagar online
+                                        </Button>
+                                      )}
+                                      {(user?.role === 'admin' || user?.role === 'manager') && alquiler.estado !== 'aprobado' && (
+                                        <Button size="small" variant="outlined" onClick={() => handleRegistrarPagoAlquilerManual(alquiler.id)}>
+                                          Manual
+                                        </Button>
+                                      )}
+                                    </Stack>
+                                  </Stack>
+                                </Paper>
+                              ))}
+                            </Stack>
+
+                            <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' } }}>
+                              <Table size="small">
+                                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                  <TableRow>
+                                    <TableCell>Período</TableCell>
+                                    <TableCell>Unidad</TableCell>
+                                    <TableCell align="right">Monto</TableCell>
+                                    <TableCell>Estado</TableCell>
+                                    <TableCell>Método</TableCell>
+                                    <TableCell>Vencimiento</TableCell>
+                                    <TableCell>Acciones</TableCell>
                                   </TableRow>
-                                ))}
-                              </TableBody>
-                            </Table>
-                          </TableContainer>
+                                </TableHead>
+                                <TableBody>
+                                  {alquileres.map((alquiler) => (
+                                    <TableRow key={alquiler.id}>
+                                      <TableCell>{alquiler.periodo}</TableCell>
+                                      <TableCell>{alquiler.unidad?.numero ?? alquiler.unidadId.slice(0, 8)}</TableCell>
+                                      <TableCell align="right">{formatMoney(alquiler.monto)}</TableCell>
+                                      <TableCell>
+                                        <Chip
+                                          label={alquiler.estado}
+                                          size="small"
+                                          color={alquiler.estado === 'aprobado' ? 'success' : alquiler.estado === 'vencido' ? 'error' : 'warning'}
+                                        />
+                                      </TableCell>
+                                      <TableCell>{alquiler.metodo ?? '-'}</TableCell>
+                                      <TableCell>{new Date(alquiler.fechaVencimiento).toLocaleDateString('es-AR')}</TableCell>
+                                      <TableCell>
+                                        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                                          {alquiler.estado !== 'aprobado' && (
+                                            <Button size="small" variant="contained" onClick={() => handlePagarAlquilerOnline(alquiler)}>
+                                              Pagar online
+                                            </Button>
+                                          )}
+                                          {(user?.role === 'admin' || user?.role === 'manager') && alquiler.estado !== 'aprobado' && (
+                                            <Button size="small" variant="outlined" onClick={() => handleRegistrarPagoAlquilerManual(alquiler.id)}>
+                                              Manual
+                                            </Button>
+                                          )}
+                                        </Stack>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          </>
                         )}
                       </Stack>
                     </CardContent>
@@ -4520,6 +5503,18 @@ interface ManagerApiResponse extends ManagedUser {}
                       fullWidth
                       required
                       inputProps={{ min: 1, max: 31, step: 1 }}
+                    />
+                    <TextField
+                      type="file"
+                      label="Contrato digital (PDF, DOC o DOCX)"
+                      inputProps={{ accept: '.pdf,.doc,.docx' }}
+                      onChange={(event) => {
+                        const selected = (event.target as HTMLInputElement).files?.[0] ?? null;
+                        setContratoDigitalFile(selected);
+                      }}
+                      fullWidth
+                      helperText={editContratoId ? 'Opcional: adjunta un archivo para reemplazar el contrato actual.' : 'Opcional: adjunta el archivo digital del contrato.'}
+                      InputLabelProps={{ shrink: true }}
                     />
                   </Stack>
                 </DialogContent>
@@ -4610,6 +5605,181 @@ interface ManagerApiResponse extends ManagedUser {}
                 </DialogActions>
               </Dialog>
 
+              <Dialog
+                open={gastoExtraDialogOpen}
+                onClose={() => {
+                  setGastoExtraDialogOpen(false);
+                  setEditingGastoExtraId(null);
+                }}
+                fullWidth
+                maxWidth="sm"
+                PaperProps={{
+                  sx: {
+                    borderRadius: 3,
+                    border: '1px solid #7fb3a4',
+                    boxShadow: '0 18px 44px rgba(0, 95, 115, 0.22)',
+                    overflow: 'hidden',
+                  },
+                }}
+              >
+                <DialogTitle sx={{ backgroundColor: '#e7f3ef', borderBottom: '1px solid #c9dfd7' }}>
+                  {editingGastoExtraId ? 'Editar gasto extra' : 'Nuevo gasto extra'}
+                </DialogTitle>
+                <DialogContent>
+                  <Stack spacing={2} sx={{ pt: 1 }}>
+                    {user?.role === 'admin' && (
+                      <TextField
+                        select
+                        label="Organización"
+                        value={gastoExtraForm.consorcioId}
+                        onChange={(event) =>
+                          setGastoExtraForm((current) => ({
+                            ...current,
+                            consorcioId: event.target.value,
+                            unidadId: '',
+                          }))
+                        }
+                        fullWidth
+                      >
+                        {consorcios.map((consorcio) => (
+                          <MenuItem key={consorcio.id} value={consorcio.id}>
+                            {consorcio.nombre}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                    )}
+
+                    <TextField
+                      select
+                      label="Unidad"
+                      value={gastoExtraForm.unidadId}
+                      onChange={(event) =>
+                        setGastoExtraForm((current) => ({ ...current, unidadId: event.target.value }))
+                      }
+                      fullWidth
+                    >
+                      {unidades
+                        .filter((unidad) => !gastoExtraForm.consorcioId || unidad.consorcioId === gastoExtraForm.consorcioId)
+                        .map((unidad) => (
+                          <MenuItem key={unidad.id} value={unidad.id}>
+                            {unidad.numero}
+                          </MenuItem>
+                        ))}
+                    </TextField>
+
+                    <TextField
+                      label="Descripción"
+                      value={gastoExtraForm.descripcion}
+                      onChange={(event) =>
+                        setGastoExtraForm((current) => ({ ...current, descripcion: event.target.value }))
+                      }
+                      fullWidth
+                    />
+                    <TextField
+                      label="Cantidad"
+                      type="number"
+                      value={gastoExtraForm.cantidad}
+                      onChange={(event) =>
+                        setGastoExtraForm((current) => ({ ...current, cantidad: event.target.value }))
+                      }
+                      inputProps={{ min: 0.01, step: 0.01 }}
+                      fullWidth
+                    />
+                    <TextField
+                      label="Fecha"
+                      type="date"
+                      value={gastoExtraForm.fecha}
+                      onChange={(event) =>
+                        setGastoExtraForm((current) => ({ ...current, fecha: event.target.value }))
+                      }
+                      InputLabelProps={{ shrink: true }}
+                      fullWidth
+                    />
+                  </Stack>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, borderTop: '1px solid #c9dfd7', backgroundColor: '#f5faf8' }}>
+                  <Button
+                    onClick={() => {
+                      setGastoExtraDialogOpen(false);
+                      setEditingGastoExtraId(null);
+                    }}
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    variant="contained"
+                    onClick={handleSaveGastoExtra}
+                    disabled={
+                      !gastoExtraForm.consorcioId ||
+                      !gastoExtraForm.unidadId ||
+                      !gastoExtraForm.descripcion.trim() ||
+                      !gastoExtraForm.fecha ||
+                      Number.isNaN(Number(gastoExtraForm.cantidad)) ||
+                      Number(gastoExtraForm.cantidad) <= 0
+                    }
+                  >
+                    {editingGastoExtraId ? 'Guardar cambios' : 'Crear gasto extra'}
+                  </Button>
+                </DialogActions>
+              </Dialog>
+
+              <Fade in={viewMode === 'gastosExtras'} mountOnEnter unmountOnExit timeout={220}>
+                <Card sx={{ borderRadius: 4 }}>
+                  <CardContent>
+                    <Stack spacing={2.5}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.2}>
+                        <Box>
+                          <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
+                            Gastos extras
+                          </Typography>
+                          <Typography variant="h5">Registro por unidad</Typography>
+                          <Typography color="text.secondary">
+                            Carga gastos extras por unidad con cantidad, fecha y descripción.
+                          </Typography>
+                        </Box>
+                        <Button variant="contained" onClick={handleOpenCreateGastoExtra}>
+                          Nuevo gasto extra
+                        </Button>
+                      </Stack>
+
+                      {gastosExtras.length === 0 ? (
+                        <Alert severity="info">Aún no hay gastos extras cargados.</Alert>
+                      ) : (
+                        <TableContainer component={Paper}>
+                          <Table size="small">
+                            <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                              <TableRow>
+                                <TableCell>Unidad</TableCell>
+                                <TableCell>Descripción</TableCell>
+                                <TableCell>Fecha</TableCell>
+                                <TableCell align="right">Cantidad</TableCell>
+                                <TableCell>Acciones</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {gastosExtras.map((item) => (
+                                <TableRow key={item.id}>
+                                  <TableCell>{item.unidad?.numero ?? unidades.find((u) => u.id === item.unidadId)?.numero ?? item.unidadId.slice(0, 8)}</TableCell>
+                                  <TableCell>{item.descripcion}</TableCell>
+                                  <TableCell>{new Date(item.fecha).toLocaleDateString('es-AR')}</TableCell>
+                                  <TableCell align="right">{formatMoney(item.cantidad)}</TableCell>
+                                  <TableCell>
+                                    <Stack direction="row" spacing={1}>
+                                      <Button size="small" variant="outlined" onClick={() => handleStartEditGastoExtra(item)}>Editar</Button>
+                                      <Button size="small" color="error" onClick={() => handleDeleteGastoExtra(item.id)}>Eliminar</Button>
+                                    </Stack>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      )}
+                    </Stack>
+                  </CardContent>
+                </Card>
+              </Fade>
+
               <Fade in={viewMode === 'reportes'} mountOnEnter unmountOnExit timeout={220}>
                 <Card sx={{ borderRadius: 4 }}>
                   <CardContent>
@@ -4618,9 +5788,11 @@ interface ManagerApiResponse extends ManagedUser {}
                         <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>
                           Reportes
                         </Typography>
-                        <Typography variant="h5">Resumen mensual del consorcio</Typography>
+                        <Typography variant="h5">Resumen mensual de la organización</Typography>
                         <Typography color="text.secondary">
-                          Consulta totales de gastos, expensas emitidas y pagos registrados por período.
+                          {reporteHasAlquileresModule && !reporteHasConsorcioModule
+                            ? 'Consulta contratos activos, gastos extras y pagos de alquiler del período.'
+                            : 'Consulta totales de gastos, expensas emitidas y pagos registrados por período.'}
                         </Typography>
                       </Box>
 
@@ -4654,28 +5826,51 @@ interface ManagerApiResponse extends ManagedUser {}
                           variant="contained"
                           onClick={handleLoadReporte}
                           disabled={reporteLoading || !reportePeriodo || (user?.role === 'admin' && !reporteConsorcioId)}
+                          sx={{ width: { xs: '100%', md: 'auto' } }}
                         >
                           {reporteLoading ? 'Consultando...' : 'Consultar'}
                         </Button>
                       </Stack>
 
                       {reporteResumen ? (
-                        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(4, 1fr)' }, gap: 1.5 }}>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Gastos</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalGastos)}</Typography>
+                        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', xl: 'repeat(4, minmax(0, 1fr))' }, gap: 1.5 }}>
+                          <Paper sx={{ p: { xs: 1.5, sm: 1.75 }, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule ? 'Gastos extras' : 'Gastos'}
+                            </Typography>
+                            <Typography variant="h6" sx={{ wordBreak: 'break-word' }}>{formatMoney(reporteResumen.totalGastos)}</Typography>
                           </Paper>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Expensas emitidas</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalExpensas)}</Typography>
+                          <Paper sx={{ p: { xs: 1.5, sm: 1.75 }, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule ? 'Contratos activos' : 'Expensas emitidas'}
+                            </Typography>
+                            <Typography variant="h6" sx={{ wordBreak: 'break-word' }}>
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule
+                                ? String(reporteResumen.contratosActivos ?? 0)
+                                : formatMoney(reporteResumen.totalExpensas)}
+                            </Typography>
                           </Paper>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Pagos registrados</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalPagos)}</Typography>
+                          <Paper sx={{ p: { xs: 1.5, sm: 1.75 }, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule ? 'Pagos de alquiler' : 'Pagos registrados'}
+                            </Typography>
+                            <Typography variant="h6" sx={{ wordBreak: 'break-word' }}>
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule
+                                ? formatMoney(reporteResumen.totalPagosAlquiler ?? 0)
+                                : formatMoney(reporteResumen.totalPagos)}
+                            </Typography>
                           </Paper>
-                          <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-                            <Typography variant="caption" color="text.secondary">Saldo ({reporteResumen.periodo})</Typography>
-                            <Typography variant="h6">{formatMoney(reporteResumen.totalExpensas - reporteResumen.totalPagos)}</Typography>
+                          <Paper sx={{ p: { xs: 1.5, sm: 1.75 }, borderRadius: 2 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule
+                                ? `Saldo alquiler (${reporteResumen.periodo})`
+                                : `Saldo (${reporteResumen.periodo})`}
+                            </Typography>
+                            <Typography variant="h6" sx={{ wordBreak: 'break-word' }}>
+                              {reporteHasAlquileresModule && !reporteHasConsorcioModule
+                                ? formatMoney((reporteResumen.totalAlquileresPeriodo ?? 0) - (reporteResumen.totalPagosAlquiler ?? 0))
+                                : formatMoney(reporteResumen.totalExpensas - reporteResumen.totalPagos)}
+                            </Typography>
                           </Paper>
                         </Box>
                       ) : (
@@ -4695,12 +5890,12 @@ interface ManagerApiResponse extends ManagedUser {}
                           {canManageIntegraciones ? 'Configuración' : 'Recordatorios'}
                         </Typography>
                         <Typography variant="h5">
-                          {canManageIntegraciones ? 'Integraciones, WhatsApp y notificaciones' : 'Recordatorios del consorcio'}
+                          {canManageIntegraciones ? 'Integraciones, WhatsApp y notificaciones' : 'Recordatorios de la organización'}
                         </Typography>
                         <Typography color="text.secondary">
                           {canManageIntegraciones
                             ? 'Gestiona claves por consorcio y valida envíos desde un panel administrativo.'
-                            : 'Envía recordatorios de pagos pendientes para tu consorcio.'}
+                            : 'Envía recordatorios de pagos pendientes para tu organización.'}
                         </Typography>
                       </Box>
 
@@ -4738,6 +5933,7 @@ interface ManagerApiResponse extends ManagedUser {}
                             !reportePeriodo ||
                             (canManageIntegraciones && !reporteConsorcioId)
                           }
+                          sx={{ width: { xs: '100%', md: 'auto' } }}
                         >
                           {recordatorioLoading ? 'Enviando...' : 'Recordar pendientes'}
                         </Button>
@@ -4765,6 +5961,7 @@ interface ManagerApiResponse extends ManagedUser {}
                               size="small"
                               onClick={handleLoadConsorcioIntegracion}
                               disabled={integracionLoading || !reporteConsorcioId}
+                              sx={{ width: { xs: '100%', sm: 'auto' } }}
                             >
                               {integracionLoading ? 'Cargando...' : 'Recargar configuración'}
                             </Button>
@@ -4872,6 +6069,7 @@ interface ManagerApiResponse extends ManagedUser {}
                                   variant="contained"
                                   onClick={handleSaveConsorcioIntegracion}
                                   disabled={integracionSaving || !reporteConsorcioId}
+                                  sx={{ width: { xs: '100%', md: 'auto' } }}
                                 >
                                   {integracionSaving ? 'Guardando...' : 'Guardar claves'}
                                 </Button>
@@ -4895,6 +6093,7 @@ interface ManagerApiResponse extends ManagedUser {}
                               size="small"
                               onClick={handleLoadWhatsappHealth}
                               disabled={whatsappHealthLoading || !reporteConsorcioId}
+                              sx={{ width: { xs: '100%', sm: 'auto' } }}
                             >
                               {whatsappHealthLoading ? 'Verificando...' : 'Verificar conexión'}
                             </Button>
@@ -4952,6 +6151,7 @@ interface ManagerApiResponse extends ManagedUser {}
                               variant="contained"
                               onClick={handleSendWhatsappTest}
                               disabled={whatsappTestLoading || !whatsappTestPhone.trim()}
+                              sx={{ width: { xs: '100%', md: 'auto' } }}
                             >
                               {whatsappTestLoading ? 'Enviando...' : 'Enviar prueba'}
                             </Button>
@@ -4976,6 +6176,7 @@ interface ManagerApiResponse extends ManagedUser {}
                               </Typography>
                             </Box>
                             <Button variant="outlined" size="small" onClick={handleLoadNotificationHistory} disabled={historialLoading}>
+                              
                               {historialLoading ? 'Actualizando...' : 'Actualizar historial'}
                             </Button>
                           </Stack>
@@ -5023,41 +6224,106 @@ interface ManagerApiResponse extends ManagedUser {}
               </Fade>
 
               <Fade in={viewMode === 'data'} mountOnEnter unmountOnExit timeout={220}>
-                <Card>
-                  <CardContent>
-                    <Stack spacing={2}>
+                <Card sx={{ borderRadius: 4, border: '1px solid #d7e5df', boxShadow: '0 14px 34px rgba(0,0,0,0.06)' }}>
+                  <CardContent sx={{ p: 3 }}>
+                    <Stack spacing={3}>
+                      <Box>
+                        <Typography variant="overline" sx={{ color: '#005f73', letterSpacing: 1.2 }}>Módulo</Typography>
+                        <Typography variant="h5" sx={{ mb: 1 }}>Tablas y registros</Typography>
+                      </Box>
                       <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
                         <Box sx={{ display: { xs: 'block', md: 'none' }, pb: 1.2 }}>
+                          <Paper
+                            elevation={0}
+                            sx={{
+                              mb: 1.2,
+                              p: 1.2,
+                              borderRadius: 2,
+                              border: '1px solid #dce9e4',
+                              backgroundColor: '#f7fbf9',
+                            }}
+                          >
+                            <Stack spacing={1}>
+                              <Box>
+                                <Typography variant="caption" color="text.secondary">
+                                  Sección activa
+                                </Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                  {dataTabLabels[AVAILABLE_DATA_TABS.includes(dataTab) ? dataTab : AVAILABLE_DATA_TABS[0]]}
+                                </Typography>
+                              </Box>
+                              <Stack direction="row" spacing={0.8} sx={{ overflowX: 'auto', pb: 0.3 }}>
+                                {AVAILABLE_DATA_TABS.map((tab) => (
+                                  <Chip
+                                    key={`data-tab-chip-${tab}`}
+                                    label={`${dataTabLabels[tab]} (${dataTabCounts[tab]})`}
+                                    size="small"
+                                    color={dataTab === tab ? 'primary' : 'default'}
+                                    variant={dataTab === tab ? 'filled' : 'outlined'}
+                                    onClick={() => setDataTab(tab)}
+                                    sx={{ flexShrink: 0 }}
+                                  />
+                                ))}
+                              </Stack>
+                            </Stack>
+                          </Paper>
+
                           <TextField
                             select
                             fullWidth
                             size="small"
                             label="Sección"
-                            value={dataTab}
+                            value={AVAILABLE_DATA_TABS.includes(dataTab) ? dataTab : AVAILABLE_DATA_TABS[0]}
                             onChange={(event) => setDataTab(event.target.value as DataTab)}
                           >
-                            <MenuItem value="consorcios">Consorcios ({consorcios.length})</MenuItem>
-                            <MenuItem value="unidades">Unidades ({unidades.length})</MenuItem>
-                            <MenuItem value="gastos">Gastos ({gastos.length})</MenuItem>
-                            <MenuItem value="expensas">Expensas ({expensas.length})</MenuItem>
-                            <MenuItem value="pagos">Pagos ({pagos.length})</MenuItem>
+                            {AVAILABLE_DATA_TABS.includes('consorcios') && (
+                              <MenuItem value="consorcios">{dataTabLabels.consorcios} ({dataTabCounts.consorcios})</MenuItem>
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('unidades') && (
+                              <MenuItem value="unidades">{dataTabLabels.unidades} ({dataTabCounts.unidades})</MenuItem>
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('gastos') && (
+                              <MenuItem value="gastos">{dataTabLabels.gastos} ({dataTabCounts.gastos})</MenuItem>
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('gastosExtras') && (
+                              <MenuItem value="gastosExtras">{dataTabLabels.gastosExtras} ({dataTabCounts.gastosExtras})</MenuItem>
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('expensas') && (
+                              <MenuItem value="expensas">{dataTabLabels.expensas} ({dataTabCounts.expensas})</MenuItem>
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('pagos') && (
+                              <MenuItem value="pagos">{dataTabLabels.pagos} ({dataTabCounts.pagos})</MenuItem>
+                            )}
                           </TextField>
                         </Box>
 
                         <Box sx={{ display: { xs: 'none', md: 'block' } }}>
                           <Tabs
-                            value={dataTab}
+                            value={AVAILABLE_DATA_TABS.includes(dataTab) ? dataTab : AVAILABLE_DATA_TABS[0]}
                             onChange={(_event, value: DataTab) => setDataTab(value)}
                             variant="scrollable"
                             scrollButtons="auto"
                             allowScrollButtonsMobile
                             aria-label="Pestañas de tablas y registros"
                           >
-                            <Tab value="consorcios" label={`Consorcios (${consorcios.length})`} />
-                            <Tab value="unidades" label={`Unidades (${unidades.length})`} />
-                            <Tab value="gastos" label={`Gastos (${gastos.length})`} />
-                            <Tab value="expensas" label={`Expensas (${expensas.length})`} />
-                            <Tab value="pagos" label={`Pagos (${pagos.length})`} />
+                            {AVAILABLE_DATA_TABS.includes('consorcios') && (
+                              <Tab value="consorcios" label={`Organizaciones (${consorcios.length})`} />
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('unidades') && (
+                              <Tab value="unidades" label={`Unidades (${unidades.length})`} />
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('gastos') && (
+                              <Tab value="gastos" label={`Gastos (${gastos.length})`} />
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('gastosExtras') && (
+                              <Tab value="gastosExtras" label={`Gastos extras (${gastosExtras.length})`} />
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('expensas') && (
+                              <Tab value="expensas" label={`Expensas (${expensas.length})`} />
+                            )}
+                            {AVAILABLE_DATA_TABS.includes('pagos') && (
+                              <Tab value="pagos" label={`Pagos (${pagos.length})`} />
+                            )}
                           </Tabs>
                         </Box>
                       </Box>
@@ -5065,10 +6331,10 @@ interface ManagerApiResponse extends ManagedUser {}
                       {dataTab === 'consorcios' && (
                         <Box>
                           <Typography variant="h6" gutterBottom>
-                            Consorcios
+                            Organizaciones
                           </Typography>
                           {consorcios.length === 0 ? (
-                            <Alert severity="info">No hay consorcios cargados todavía.</Alert>
+                            <Alert severity="info">No hay organizaciones cargadas todavía.</Alert>
                           ) : (
                             <>
                               <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
@@ -5087,18 +6353,23 @@ interface ManagerApiResponse extends ManagedUser {}
                                   >
                                     <Typography variant="subtitle2">{consorcio.nombre}</Typography>
                                     <Typography variant="caption" color="text.secondary">
-                                      {consorcio.direccion}
+                                      {consorcioTipoLabels[consorcio.tipo]} | {consorcio.direccion}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary">
+                                      Módulos: {consorcio.modulos.map((modulo) => moduloLabels[modulo]).join(', ')}
                                     </Typography>
                                   </Paper>
                                 ))}
                               </Stack>
 
                               <TableContainer component={Paper} sx={{ overflowX: 'auto', display: { xs: 'none', md: 'block' } }}>
-                                <Table size="small" sx={{ minWidth: 680 }}>
+                                <Table size="small" sx={{ minWidth: 860 }}>
                                   <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
                                     <TableRow>
                                       <TableCell>Nombre</TableCell>
+                                      <TableCell>Tipo</TableCell>
                                       <TableCell>Dirección</TableCell>
+                                      <TableCell>Módulos</TableCell>
                                       <TableCell>ID</TableCell>
                                     </TableRow>
                                   </TableHead>
@@ -5114,7 +6385,9 @@ interface ManagerApiResponse extends ManagedUser {}
                                         }}
                                       >
                                         <TableCell>{consorcio.nombre}</TableCell>
+                                        <TableCell>{consorcioTipoLabels[consorcio.tipo]}</TableCell>
                                         <TableCell>{consorcio.direccion}</TableCell>
+                                        <TableCell>{consorcio.modulos.map((modulo) => moduloLabels[modulo]).join(', ')}</TableCell>
                                         <TableCell sx={{ fontSize: '0.75rem' }}>{consorcio.id.slice(0, 8)}</TableCell>
                                       </TableRow>
                                     ))}
@@ -5148,7 +6421,10 @@ interface ManagerApiResponse extends ManagedUser {}
                                     }}
                                   >
                                     <Stack spacing={0.8}>
-                                      <Typography variant="subtitle2">Unidad {unidad.numero}</Typography>
+                                      <Typography variant="subtitle2">{tipoPropiedadLabels[unidad.tipo]} {unidad.numero}</Typography>
+                                      <Typography variant="caption" color="text.secondary">
+                                        Nombre: {unidad.nombre?.trim() || '-'}
+                                      </Typography>
                                       <Typography variant="caption" color="text.secondary">
                                         Coef.: {unidad.coeficiente.toFixed(2)} | m2: {unidad.metrosCuadrados == null ? '-' : unidad.metrosCuadrados.toFixed(2)}
                                       </Typography>
@@ -5173,6 +6449,8 @@ interface ManagerApiResponse extends ManagedUser {}
                                   <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
                                     <TableRow>
                                       <TableCell>Número</TableCell>
+                                      <TableCell>Tipo</TableCell>
+                                      <TableCell>Nombre</TableCell>
                                       <TableCell align="right">Coeficiente</TableCell>
                                       <TableCell align="right">m2</TableCell>
                                       <TableCell>Propietario</TableCell>
@@ -5191,6 +6469,8 @@ interface ManagerApiResponse extends ManagedUser {}
                                         }}
                                       >
                                         <TableCell>{unidad.numero}</TableCell>
+                                        <TableCell>{tipoPropiedadLabels[unidad.tipo]}</TableCell>
+                                        <TableCell>{unidad.nombre?.trim() || '-'}</TableCell>
                                         <TableCell align="right">{unidad.coeficiente.toFixed(2)}</TableCell>
                                         <TableCell align="right">
                                           {unidad.metrosCuadrados == null ? '-' : unidad.metrosCuadrados.toFixed(2)}
@@ -5245,6 +6525,61 @@ interface ManagerApiResponse extends ManagedUser {}
                                       <TableRow key={gasto.id}>
                                         <TableCell>{gasto.descripcion}</TableCell>
                                         <TableCell align="right">{formatMoney(gasto.monto)}</TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </TableBody>
+                                </Table>
+                              </TableContainer>
+                            </>
+                          )}
+                        </Box>
+                      )}
+
+                      {dataTab === 'gastosExtras' && (
+                        <Box>
+                          <Typography variant="h6" gutterBottom>
+                            Gastos extras
+                          </Typography>
+                          {gastosExtras.length === 0 ? (
+                            <Alert severity="info">No hay gastos extras cargados todavía.</Alert>
+                          ) : (
+                            <>
+                              <Stack spacing={1.2} sx={{ display: { xs: 'flex', md: 'none' } }}>
+                                {gastosExtras.map((gastoExtra) => (
+                                  <Paper key={`gasto-extra-card-${gastoExtra.id}`} elevation={0} sx={{ p: 1.5, borderRadius: 2, border: '1px solid #dce9e4' }}>
+                                    <Stack spacing={0.6}>
+                                      <Typography variant="subtitle2">{gastoExtra.descripcion}</Typography>
+                                      <Typography variant="caption" color="text.secondary">
+                                        Unidad: {gastoExtra.unidad?.numero ?? 'N/D'}
+                                      </Typography>
+                                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                        Cantidad: {gastoExtra.cantidad}
+                                      </Typography>
+                                      <Typography variant="caption" color="text.secondary">
+                                        Fecha: {new Date(gastoExtra.fecha).toLocaleDateString('es-AR')}
+                                      </Typography>
+                                    </Stack>
+                                  </Paper>
+                                ))}
+                              </Stack>
+
+                              <TableContainer component={Paper} sx={{ overflowX: 'auto', display: { xs: 'none', md: 'block' } }}>
+                                <Table size="small" sx={{ minWidth: 660 }}>
+                                  <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                                    <TableRow>
+                                      <TableCell>Descripción</TableCell>
+                                      <TableCell>Unidad</TableCell>
+                                      <TableCell align="right">Cantidad</TableCell>
+                                      <TableCell>Fecha</TableCell>
+                                    </TableRow>
+                                  </TableHead>
+                                  <TableBody>
+                                    {gastosExtras.map((gastoExtra) => (
+                                      <TableRow key={gastoExtra.id}>
+                                        <TableCell>{gastoExtra.descripcion}</TableCell>
+                                        <TableCell>{gastoExtra.unidad?.numero ?? 'N/D'}</TableCell>
+                                        <TableCell align="right">{gastoExtra.cantidad}</TableCell>
+                                        <TableCell>{new Date(gastoExtra.fecha).toLocaleDateString('es-AR')}</TableCell>
                                       </TableRow>
                                     ))}
                                   </TableBody>
